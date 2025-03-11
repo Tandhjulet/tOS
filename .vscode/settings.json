@@ -1,4 +1,0 @@
-{
-	"rust-analyzer.cargo.target": "x86_64-tOS",
-	"rust-analyzer.check.allTargets": false,
-  }
