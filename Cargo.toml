@@ -3,16 +3,14 @@ name = "tOS"
 version = "0.1.0"
 edition = "2024"
 
-[profile.dev]
-panic = "abort"
-
-[profile.release]
-panic = "abort"
+[package.metadata.bootimage]
+test-args = ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"]
 
 [dependencies]
 bootloader = "0.9"
 volatile = "0.2.6"
+spin = "0.5.2"
 
-[[bin]]
-test = false
-name = "tOS"
+[dependencies.lazy_static]
+version = "1.0"
+features = ["spin_no_std"]
