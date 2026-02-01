@@ -13,6 +13,9 @@ pub extern "C" fn _start() -> ! {
 
     tOS::init();
 
+    let ptr = 0xdeadbeef as *mut u8;
+    unsafe { *ptr = 42 };
+
     #[cfg(test)]
     test_main();
 
