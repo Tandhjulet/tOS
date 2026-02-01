@@ -1,38 +1,47 @@
-#![no_std] // the std won't be available in the os env
-#![no_main] // disable all rust entry points
+#![no_std]
+#![no_main]
 #![feature(custom_test_frameworks)]
-#![test_runner(t_os::tests::test_runner)]
+#![test_runner(tOS::test_runner)]
 #![reexport_test_harness_main = "test_main"]
 
 use core::panic::PanicInfo;
+use tOS::println;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
     println!("Hello World{}", "!");
 
-    t_os::init();
+    tOS::init();
 
-    x86_64::instructions::interrupts::int3();
+    fn stack_overflow() {
+        stack_overflow(); // for each recursion, the return address is pushed
+    }
+
+    // uncomment line below to trigger a stack overflow
+    // stack_overflow();
 
     #[cfg(test)]
     test_main();
 
+    println!("It did not crash!");
     loop {}
 }
 
-// Called on panic
+/// This function is called on panic.
 #[cfg(not(test))]
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
-    serial_println!("{}", info.message().as_str().unwrap_or("Panicked!"));
+    println!("{}", info);
     loop {}
 }
 
 #[cfg(test)]
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
-    t_os::tests::panic_handler(info)
+    tOS::test_panic_handler(info)
 }
 
-pub mod serial;
-pub mod vga_buffer;
+#[test_case]
+fn trivial_assertion() {
+    assert_eq!(1, 1);
+}

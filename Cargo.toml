@@ -1,7 +1,32 @@
 [package]
-name = "t_os"
+name = "tOS"
 version = "0.1.0"
 edition = "2024"
+
+[[test]]
+name = "should_panic"
+harness = false
+
+[[test]]
+name = "stack_overflow"
+harness = false
+
+[dependencies]
+bootloader = "0.9"
+volatile = "0.2.6"
+spin = "0.5.2"
+x86_64 = "0.14.2"
+uart_16550 = "0.2.0"
+
+[dependencies.lazy_static]
+version = "1.0"
+features = ["spin_no_std"]
+
+[[bin]]
+name = "tOS"
+test = true
+bench = false
+
 
 [package.metadata.bootimage]
 test-args = [
@@ -12,16 +37,4 @@ test-args = [
 	"-display",
 	"none",
 ]
-test-success-exit-code = 33
-test-timeout = 300
-
-[dependencies]
-bootloader = "0.9"
-volatile = "0.2.6"
-spin = "0.5.2"
-uart_16550 = "0.2.0"
-x86_64 = "0.14.2"
-
-[dependencies.lazy_static]
-version = "1.0"
-features = ["spin_no_std"]
+test-success-exit-code = 33 # (0x10 << 1) | 1
