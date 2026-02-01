@@ -13,13 +13,6 @@ pub extern "C" fn _start() -> ! {
 
     tOS::init();
 
-    fn stack_overflow() {
-        stack_overflow(); // for each recursion, the return address is pushed
-    }
-
-    // uncomment line below to trigger a stack overflow
-    // stack_overflow();
-
     #[cfg(test)]
     test_main();
 
