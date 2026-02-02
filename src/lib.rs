@@ -20,6 +20,7 @@ pub fn init() {
     };
     x86_64::instructions::interrupts::enable();
 }
+
 pub trait Testable {
     fn run(&self) -> ();
 }
@@ -66,10 +67,14 @@ pub fn exit_qemu(exit_code: QemuExitCode) {
     }
 }
 
-/// Entry point for `cargo xtest`
 #[cfg(test)]
-#[unsafe(no_mangle)]
-pub extern "C" fn _start() -> ! {
+use bootloader::{BootInfo, entry_point};
+
+#[cfg(test)]
+entry_point!(test_kernel_main);
+
+#[cfg(test)]
+fn test_kernel_main(_bott_info: &'static BootInfo) -> ! {
     init();
     test_main();
     hlt_loop();
@@ -86,3 +91,5 @@ pub fn hlt_loop() -> ! {
         x86_64::instructions::hlt();
     }
 }
+
+pub mod memory;
