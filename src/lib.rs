@@ -7,10 +7,14 @@
 
 use core::panic::PanicInfo;
 
+pub mod allocator;
 pub mod gdt;
 pub mod interrupts;
+pub mod memory;
 pub mod serial;
 pub mod vga_buffer;
+
+extern crate alloc;
 
 pub fn init() {
     gdt::init();
@@ -91,5 +95,3 @@ pub fn hlt_loop() -> ! {
         x86_64::instructions::hlt();
     }
 }
-
-pub mod memory;
