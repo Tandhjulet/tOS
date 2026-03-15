@@ -9,7 +9,7 @@ use core::panic::PanicInfo;
 use tOS::{
     allocator,
     memory::BootInfoFrameAllocator,
-    println,
+    networking, println,
     task::{Task, executor::Executor, keyboard},
 };
 
@@ -29,6 +29,8 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     let mut frame_allocator = unsafe { BootInfoFrameAllocator::init(&boot_info.memory_map) };
 
     allocator::init_heap(&mut mapper, &mut frame_allocator).expect("heap initialization failed");
+
+    networking::scan_buses();
 
     let mut executor = Executor::new();
     executor.spawn(Task::new(example_task()));
