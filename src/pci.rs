@@ -1,10 +1,15 @@
 use core::fmt;
 
 use alloc::vec::Vec;
+use lazy_static::lazy_static;
 use x86_64::instructions::port::Port;
 
 const CONFIG_ADDRESS: u16 = 0xCF8;
 const CONFIG_DATA: u16 = 0xCFC;
+
+lazy_static! {
+    pub static ref DEVICES: Vec<PciDevice> = check_all_buses();
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct PciDevice {
@@ -15,6 +20,12 @@ pub struct PciDevice {
     pub device_id: u16,
     pub class: u8,
     pub subclass: u8,
+}
+
+impl PciDevice {
+    pub fn read(&self, offset: u8) -> u32 {
+        pci_read(self.bus, self.device, self.function, offset)
+    }
 }
 
 impl fmt::Display for PciDevice {
@@ -33,7 +44,7 @@ impl fmt::Display for PciDevice {
     }
 }
 
-pub fn check_all_buses() -> Vec<PciDevice> {
+fn check_all_buses() -> Vec<PciDevice> {
     let mut devices: Vec<PciDevice> = Vec::new();
     for bus in 0..=255 {
         for device in 0..32 {
