@@ -10,7 +10,7 @@ use tOS::{
     allocator,
     memory::BootInfoFrameAllocator,
     println,
-    task::{Task, executor::Executor, keyboard, simple_executor::SimpleExecutor},
+    task::{Task, executor::Executor, keyboard},
 };
 
 extern crate alloc;
