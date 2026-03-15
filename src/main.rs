@@ -4,15 +4,13 @@
 #![test_runner(tOS::test_runner)]
 #![reexport_test_harness_main = "test_main"]
 
-use alloc::{boxed::Box, rc::Rc, vec, vec::Vec};
-
 use bootloader::{BootInfo, entry_point};
 use core::panic::PanicInfo;
 use tOS::{
     allocator,
     memory::BootInfoFrameAllocator,
     println,
-    task::{Task, simple_executor::SimpleExecutor},
+    task::{Task, executor::Executor, keyboard, simple_executor::SimpleExecutor},
 };
 
 extern crate alloc;
@@ -32,15 +30,10 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
 
     allocator::init_heap(&mut mapper, &mut frame_allocator).expect("heap initialization failed");
 
-    let mut executor = SimpleExecutor::new();
+    let mut executor = Executor::new();
     executor.spawn(Task::new(example_task()));
+    executor.spawn(Task::new(keyboard::print_keypresses()));
     executor.run();
-
-    #[cfg(test)]
-    test_main();
-
-    println!("It did not crash!");
-    tOS::hlt_loop();
 }
 
 async fn async_number() -> u32 {
