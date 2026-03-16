@@ -4,9 +4,14 @@
  */
 use core::ptr::{read_volatile, write_volatile};
 
-use x86_64::instructions::port::Port;
+use x86_64::{PhysAddr, instructions::port::Port};
 
-use crate::{networking::NetworkDriver, pci::PciDevice, print, println};
+use crate::{
+    allocator::{self, mmio},
+    networking::NetworkDriver,
+    pci::PciDevice,
+    print, println,
+};
 
 const E1000_NUM_RX_DESC: usize = 32;
 const E1000_NUM_TX_DESC: usize = 8;
@@ -82,6 +87,11 @@ impl E1000 {
 
             (0, mem_base)
         };
+
+        if !is_io_bar {
+            let phys_addr = PhysAddr::new(mem_base);
+            mmio::map_mmio_region(phys_addr, virt_start, size);
+        }
 
         // TODO: map phys -> virt addrs so we can access
 

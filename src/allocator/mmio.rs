@@ -1,0 +1,60 @@
+use core::sync::atomic::AtomicU64;
+
+use x86_64::{
+    PhysAddr, VirtAddr, align_up,
+    structures::paging::{Mapper, Page, PageTableFlags, PhysFrame, Size4KiB, mapper::MapToError},
+};
+
+use crate::allocator::{MAPPER, memory::EmptyFrameAllocator};
+
+const PAGE_SIZE: u64 = 4096;
+
+static NEXT_MMIO: AtomicU64 = AtomicU64::new(0xFFFF_8000_0000_0000);
+
+pub fn map_mmio(phys_addr: PhysAddr, size: u64) -> VirtAddr {
+    let aligned_size = (size + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+
+    let virt_start =
+        VirtAddr::new(NEXT_MMIO.fetch_add(aligned_size, core::sync::atomic::Ordering::SeqCst));
+
+    let phys_start = phys_addr.align_down(PAGE_SIZE);
+
+    map_mmio_region(phys_start, virt_start, aligned_size);
+
+    // if the phys_addr was not page aligned, we need to
+    // add the offset to the virt start
+    let offset = phys_addr.as_u64() & (PAGE_SIZE - 1);
+    virt_start + offset
+}
+
+pub fn map_mmio_region(
+    phys_addr: PhysAddr,
+    virt_start: VirtAddr,
+    size: u64,
+) -> Result<(), MapToError<Size4KiB>> {
+    let mut guard = MAPPER.lock();
+    let mapper = guard.as_mut().unwrap();
+
+    let page_range = {
+        let start_page = Page::<Size4KiB>::containing_address(virt_start);
+        let end_page = Page::<Size4KiB>::containing_address(virt_start + size - 1u64);
+
+        Page::range_inclusive(start_page, end_page)
+    };
+
+    let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_CACHE;
+
+    for page in page_range {
+        let frame = PhysFrame::containing_address(PhysAddr::new(
+            phys_addr.as_u64() + (page.start_address().as_u64() - virt_start.as_u64()),
+        ));
+
+        unsafe {
+            mapper
+                .map_to(page, frame, flags, &mut EmptyFrameAllocator)?
+                .flush()
+        };
+    }
+
+    Ok(())
+}
