@@ -17,19 +17,20 @@ pub const HEAP_START: usize = 0x_4444_4444_0000;
 pub const HEAP_SIZE: usize = 100 * 1024; // 100 KiB
 
 static MAPPER: Mutex<Option<OffsetPageTable<'static>>> = Mutex::new(None);
+static FRAME_ALLOCATOR: Mutex<Option<BootInfoFrameAllocator>> = Mutex::new(None);
 
 pub fn init(boot_info: &'static BootInfo) -> Result<(), MapToError<Size4KiB>> {
     let phys_mem_offset = VirtAddr::new(boot_info.physical_memory_offset);
     let mapper = unsafe { memory::init(phys_mem_offset) };
-    let mut frame_allocator = unsafe { BootInfoFrameAllocator::init(&boot_info.memory_map) };
     *MAPPER.lock() = Some(mapper);
 
-    init_heap(&mut frame_allocator)
+    let frame_allocator = unsafe { BootInfoFrameAllocator::init(&boot_info.memory_map) };
+    *FRAME_ALLOCATOR.lock() = Some(frame_allocator);
+
+    init_heap()
 }
 
-fn init_heap(
-    frame_allocator: &mut impl FrameAllocator<Size4KiB>,
-) -> Result<(), MapToError<Size4KiB>> {
+fn init_heap() -> Result<(), MapToError<Size4KiB>> {
     let page_range = {
         let heap_start = VirtAddr::new(HEAP_START as u64);
         let heap_end = heap_start + HEAP_SIZE - 1u64;
@@ -38,8 +39,11 @@ fn init_heap(
         Page::range_inclusive(heap_start_page, heap_end_page)
     };
 
-    let mut guard = MAPPER.lock();
-    let mapper = guard.as_mut().unwrap();
+    let mut mapper_guard = MAPPER.lock();
+    let mapper = mapper_guard.as_mut().unwrap();
+
+    let mut frame_guard = FRAME_ALLOCATOR.lock();
+    let frame_allocator = frame_guard.as_mut().unwrap();
 
     for page in page_range {
         let frame = frame_allocator

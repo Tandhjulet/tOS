@@ -2,14 +2,15 @@
  * See https://wiki.osdev.org/Intel_Ethernet_i217 for documentation
  * details regarding the implementation of the E1000 driver.
  */
-use core::ptr::{read_volatile, write_volatile};
-
-use x86_64::{PhysAddr, instructions::port::Port};
+use x86_64::PhysAddr;
 
 use crate::{
-    allocator::{self, mmio},
+    allocator::mmio,
     networking::NetworkDriver,
-    pci::PciDevice,
+    pci::{
+        PciDevice,
+        bar::{AnyBAR, BAR},
+    },
     print, println,
 };
 
@@ -17,8 +18,6 @@ const E1000_NUM_RX_DESC: usize = 32;
 const E1000_NUM_TX_DESC: usize = 8;
 
 const REG_EEPROM: u16 = 0x0014;
-const BAR0_OFFSET: u8 = 0x10;
-const BAR1_OFFSET: u8 = 0x14;
 
 pub struct E1000RxDesc {
     addr: u64,
@@ -39,10 +38,8 @@ pub struct E1000TxDesc {
     special: u16,
 }
 
-pub struct E1000 {
-    bar_type: u8,
-    io_base: u16,
-    mem_base: u64,
+pub struct E1000<'a> {
+    bar0: AnyBAR<'a>,
     eeprom_exists: bool,
     mac: [u8; 6],
     rx_descs: [Option<E1000RxDesc>; E1000_NUM_RX_DESC],
@@ -51,54 +48,21 @@ pub struct E1000 {
     tx_cur: u16,
 }
 
-impl E1000 {
-    pub fn new(device: &PciDevice) -> Self {
+impl<'a> E1000<'a> {
+    pub fn new(device: &'a PciDevice) -> Self {
         // https://wiki.osdev.org/PCI#Base_Address_Registers
-        let bar0 = device.read(BAR0_OFFSET);
-        let bar_type = (bar0 & 0x1) as u8;
 
-        let is_io_bar = bar_type == 1;
+        let bar0 = device.get_bar(0);
+        if let AnyBAR::Mem(ref mem) = bar0 {
+            let addr = mem.addr() as u64;
+            let phys_addr = PhysAddr::new(addr);
 
-        // TOD: move this into the PciDevice impl
-        let (io_bar_addr, mem_base): (u16, u64) = if is_io_bar {
-            // I/O Space BAR layout
-            // Bits 31-2						Bit 1		Bit 0
-            // 4-Byte Aligned Base Address		Reserved	Always 1
-
-            let io_bar_addr = (bar0 & 0xFFFFFFFC) as u16;
-            (io_bar_addr, 0)
-        } else {
-            // Memory Space BAR layout:
-            // Bits 31-4						Bit 3			Bits 2-1	Bit 0
-            // 16-Byte Aligned Base Address		Prefetchable	Type		Always 0
-
-            let mem_type = (bar0 >> 1) & 0x3;
-            let mem_base;
-
-            if mem_type == 0x2 {
-                // 64-bit memory bar
-                let bar_low = bar0 & 0xFFFFFFF0;
-                let bar_high = device.read(BAR1_OFFSET);
-                mem_base = ((bar_high as u64) << 32) | (bar_low as u64);
-            } else {
-                // 32-bit memory bar
-                mem_base = (bar0 & 0xFFFFFFF0) as u64;
-            }
-
-            (0, mem_base)
-        };
-
-        if !is_io_bar {
-            let phys_addr = PhysAddr::new(mem_base);
-            mmio::map_mmio_region(phys_addr, virt_start, size);
+            let size = mem.size() as u64;
+            mmio::map_mmio(phys_addr, size);
         }
 
-        // TODO: map phys -> virt addrs so we can access
-
         Self {
-            bar_type,
-            io_base: io_bar_addr,
-            mem_base: mem_base,
+            bar0,
             eeprom_exists: false,
             mac: [0; 6],
             rx_descs: [(); E1000_NUM_RX_DESC].map(|_| None),
@@ -108,41 +72,14 @@ impl E1000 {
         }
     }
 
-    fn write_command(&self, p_addr: u16, p_val: u32) {
-        if self.bar_type == 0 {
-            unsafe {
-                let addr = self.mem_base + (p_addr as u64);
-                let ptr = addr as *mut u32;
-                write_volatile(ptr, p_val);
-            }
-        } else {
-            unsafe {
-                Port::<u32>::new(self.io_base).write(p_addr as u32);
-                Port::<u32>::new(self.io_base + 4).write(p_val);
-            };
-        }
-    }
-
-    fn read_command(&self, p_addr: u16) -> u32 {
-        if self.bar_type == 0 {
-            let addr = self.mem_base + (p_addr as u64);
-            unsafe {
-                return read_volatile(addr as *const u32);
-            }
-        } else {
-            unsafe {
-                Port::<u32>::new(self.io_base).write(p_addr as u32);
-                Port::<u32>::new(self.io_base + 4).read()
-            }
-        }
-    }
-
     fn detect_eeprom(&mut self) -> bool {
-        self.write_command(REG_EEPROM, 0x1);
+        print!("writing command to bar0");
+        unsafe { self.bar0.write_command(REG_EEPROM, 0x1) };
+        print!("success!");
 
         self.eeprom_exists = false;
         for _ in 0..1000 {
-            if self.read_command(REG_EEPROM) & 0x10 > 0 {
+            if unsafe { self.bar0.read_command(REG_EEPROM) } & 0x10 > 0 {
                 self.eeprom_exists = true;
             }
         }
@@ -150,19 +87,25 @@ impl E1000 {
         return self.eeprom_exists;
     }
 
-    fn read_eeprom(&self, addr: u8) -> u16 {
+    fn read_eeprom(&mut self, addr: u8) -> u16 {
         let mut tmp: u32;
 
         if self.eeprom_exists {
-            self.write_command(REG_EEPROM, 1 | ((addr as u32) << 8));
+            unsafe {
+                self.bar0
+                    .write_command(REG_EEPROM, 1 | ((addr as u32) << 8))
+            };
             while {
-                tmp = self.read_command(REG_EEPROM);
+                tmp = unsafe { self.bar0.read_command(REG_EEPROM) };
                 tmp & (1 << 4) == 0
             } {}
         } else {
-            self.write_command(REG_EEPROM, 1 | ((addr as u32) << 2));
+            unsafe {
+                self.bar0
+                    .write_command(REG_EEPROM, 1 | ((addr as u32) << 2))
+            };
             while {
-                tmp = self.read_command(REG_EEPROM);
+                tmp = unsafe { self.bar0.read_command(REG_EEPROM) };
                 tmp & (1 << 1) == 0
             } {}
         }
@@ -186,24 +129,32 @@ impl E1000 {
             return true;
         }
 
-        let mem_base_mac8: *const u8 = (self.mem_base + 0x5400) as *const u8;
-        let mem_base_mac32: *const u32 = (self.mem_base + 0x5400) as *const u32;
-
-        unsafe {
-            if (*mem_base_mac32) == 0 {
+        match &self.bar0 {
+            AnyBAR::IO(_) => {
+                println!("ERROR: Trying to read MAC without EEPROM!");
                 return false;
             }
+            AnyBAR::Mem(mem) => {
+                let mem_base_mac8: *const u8 = (mem.addr() + 0x5400) as *const u8;
+                let mem_base_mac32: *const u32 = (mem.addr() + 0x5400) as *const u32;
 
-            for i in 0..6 {
-                self.mac[i] = *mem_base_mac8.add(i);
+                unsafe {
+                    if (*mem_base_mac32) == 0 {
+                        return false;
+                    }
+
+                    for i in 0..6 {
+                        self.mac[i] = *mem_base_mac8.add(i);
+                    }
+                }
+
+                return true;
             }
         }
-
-        return true;
     }
 }
 
-impl NetworkDriver for E1000 {
+impl NetworkDriver for E1000<'_> {
     fn start(&mut self) {
         self.detect_eeprom();
         if !self.read_mac() {
