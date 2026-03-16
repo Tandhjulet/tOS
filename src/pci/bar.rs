@@ -1,6 +1,6 @@
 use core::ptr::{read_volatile, write_volatile};
 
-use x86_64::instructions::port::Port;
+use x86_64::{PhysAddr, VirtAddr, instructions::port::Port};
 
 use crate::pci::PciDevice;
 
@@ -89,7 +89,7 @@ pub struct IOBar<'a> {
     offset: u8,
     dev: &'a PciDevice,
 
-    base_addr: u16,
+    port_addr: u16,
 
     port_base: Port<u32>,
     port_data: Port<u32>,
@@ -100,7 +100,7 @@ pub struct MemBar<'a> {
     dev: &'a PciDevice,
     offset: u8,
 
-    base_addr: u64,
+    virt_addr: VirtAddr,
 }
 
 impl<'a> MemBar<'a> {
@@ -122,12 +122,19 @@ impl<'a> MemBar<'a> {
         bar_low as u64
     }
 
+    pub fn set_virt_addr(&mut self, addr: VirtAddr) {
+        self.virt_addr = addr;
+    }
+
+    pub fn virt_addr(&self) -> VirtAddr {
+        self.virt_addr
+    }
+
     pub fn new(raw: u32, offset: u8, dev: &'a PciDevice) -> Self {
-        let base_addr = MemBar::addr(raw);
         MemBar {
             raw,
             dev,
-            base_addr,
+            virt_addr: VirtAddr::zero(),
             offset,
         }
     }
@@ -138,7 +145,7 @@ impl<'a> MemBar<'a> {
 // 16-Byte Aligned Base Address		Prefetchable	Type		Always 0
 impl<'a> BAR for MemBar<'a> {
     // FIXME: only supporting 32-bit membar addrs
-    type AddrType = u32;
+    type AddrType = PhysAddr;
 
     fn addr(&self) -> Self::AddrType {
         if MemBar::is_64(self.raw) {
@@ -146,17 +153,25 @@ impl<'a> BAR for MemBar<'a> {
         }
 
         let bar_low = self.raw & 0xFFFFFFF0;
-        bar_low
+        PhysAddr::new(bar_low as u64)
     }
 
     unsafe fn write_command(&mut self, offset: u16, val: u32) {
-        let addr = self.base_addr + (offset as u64);
+        if self.virt_addr.is_null() {
+            panic!("Trying to write without assigning virt addr");
+        }
+
+        let addr = self.virt_addr.as_u64() + (offset as u64);
         let ptr = addr as *mut u32;
         unsafe { write_volatile(ptr, val) };
     }
 
     unsafe fn read_command(&mut self, offset: u16) -> u32 {
-        let addr = self.base_addr + (offset as u64);
+        if self.virt_addr.is_null() {
+            panic!("Trying to write without assigning virt addr");
+        }
+
+        let addr = self.virt_addr.as_u64() + (offset as u64);
         unsafe {
             return read_volatile(addr as *const u32);
         }
@@ -185,7 +200,7 @@ impl<'a> IOBar<'a> {
         IOBar {
             raw,
             dev,
-            base_addr,
+            port_addr: base_addr,
             port_base: Port::new(base_addr),
             port_data: Port::new(base_addr + 4),
             offset,
@@ -200,7 +215,7 @@ impl<'a> BAR for IOBar<'a> {
     type AddrType = u16;
 
     fn addr(&self) -> Self::AddrType {
-        self.base_addr
+        self.port_addr
     }
 
     unsafe fn write_command(&mut self, offset: u16, val: u32) {

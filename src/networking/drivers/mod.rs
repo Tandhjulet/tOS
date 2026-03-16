@@ -52,13 +52,16 @@ impl<'a> E1000<'a> {
     pub fn new(device: &'a PciDevice) -> Self {
         // https://wiki.osdev.org/PCI#Base_Address_Registers
 
-        let bar0 = device.get_bar(0);
-        if let AnyBAR::Mem(ref mem) = bar0 {
-            let addr = mem.addr() as u64;
-            let phys_addr = PhysAddr::new(addr);
+        let mut bar0 = device.get_bar(0);
+        if let AnyBAR::Mem(ref mut mem) = bar0 {
+            let virt_addr = {
+                let phys_addr = mem.addr();
 
-            let size = mem.size() as u64;
-            mmio::map_mmio(phys_addr, size);
+                let size = mem.size() as u64;
+                mmio::map_mmio(phys_addr, size)
+            };
+
+            mem.set_virt_addr(virt_addr);
         }
 
         Self {
@@ -73,9 +76,7 @@ impl<'a> E1000<'a> {
     }
 
     fn detect_eeprom(&mut self) -> bool {
-        print!("writing command to bar0");
         unsafe { self.bar0.write_command(REG_EEPROM, 0x1) };
-        print!("success!");
 
         self.eeprom_exists = false;
         for _ in 0..1000 {
@@ -135,8 +136,8 @@ impl<'a> E1000<'a> {
                 return false;
             }
             AnyBAR::Mem(mem) => {
-                let mem_base_mac8: *const u8 = (mem.addr() + 0x5400) as *const u8;
-                let mem_base_mac32: *const u32 = (mem.addr() + 0x5400) as *const u32;
+                let mem_base_mac8: *const u8 = (mem.virt_addr().as_u64() + 0x5400) as *const u8;
+                let mem_base_mac32: *const u32 = (mem.virt_addr().as_u64() + 0x5400) as *const u32;
 
                 unsafe {
                     if (*mem_base_mac32) == 0 {
@@ -152,6 +153,16 @@ impl<'a> E1000<'a> {
             }
         }
     }
+
+    fn print_mac(&mut self) {
+        for i in 0..6 {
+            if i != 0 {
+                print!(":");
+            }
+            print!("{:02X}", self.mac[i]);
+        }
+        println!();
+    }
 }
 
 impl NetworkDriver for E1000<'_> {
@@ -161,9 +172,7 @@ impl NetworkDriver for E1000<'_> {
             return;
         }
 
-        for i in 0..6 {
-            print!("{}", self.mac[i]);
-        }
+        self.print_mac();
     }
 
     fn fire(&mut self, frame: x86_64::structures::idt::InterruptStackFrame) {
