@@ -1,3 +1,6 @@
+pub mod executor;
+pub mod keyboard;
+
 use core::{
     pin::Pin,
     sync::atomic::{AtomicU64, Ordering},
@@ -33,6 +36,3 @@ impl Task {
         self.future.as_mut().poll(context)
     }
 }
-
-pub mod executor;
-pub mod keyboard;

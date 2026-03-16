@@ -1,3 +1,5 @@
+pub mod drivers;
+
 use x86_64::structures::idt::InterruptStackFrame;
 
 use crate::networking::drivers::E1000;
@@ -24,5 +26,3 @@ pub trait NetworkDriver {
     fn get_mac_addr(&self) -> [u8; 6];
     fn send_packet(&mut self, data: &[u8]) -> Result<(), &'static str>;
 }
-
-pub mod drivers;

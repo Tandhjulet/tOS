@@ -8,11 +8,7 @@ use core::panic::PanicInfo;
 
 use alloc::{boxed::Box, vec::Vec};
 use bootloader::{BootInfo, entry_point};
-use tOS::{
-    allocator::{self, HEAP_SIZE},
-    memory::{self, BootInfoFrameAllocator},
-};
-use x86_64::VirtAddr;
+use tOS::allocator::{self, HEAP_SIZE};
 
 extern crate alloc;
 
@@ -20,12 +16,7 @@ entry_point!(main);
 
 fn main(boot_info: &'static BootInfo) -> ! {
     tOS::init();
-
-    let phys_mem_offset = VirtAddr::new(boot_info.physical_memory_offset);
-    let mut mapper = unsafe { memory::init(phys_mem_offset) };
-    let mut frame_allocator = unsafe { BootInfoFrameAllocator::init(&boot_info.memory_map) };
-
-    allocator::init_heap(&mut mapper, &mut frame_allocator).expect("heap initialization failed");
+    allocator::init(&boot_info).expect("heap initialization failed");
 
     test_main();
     loop {}
