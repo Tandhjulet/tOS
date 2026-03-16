@@ -53,16 +53,18 @@ impl<'a> E1000<'a> {
         // https://wiki.osdev.org/PCI#Base_Address_Registers
 
         let mut bar0 = device.get_bar(0);
-        if let AnyBAR::Mem(ref mut mem) = bar0 {
+        if let AnyBAR::Mem(ref mut bar) = bar0 {
             let virt_addr = {
-                let phys_addr = mem.addr();
+                let phys_addr = bar.addr();
 
-                let size = mem.size() as u64;
+                let size = bar.size() as u64;
                 mmio::map_mmio(phys_addr, size)
             };
 
-            mem.set_virt_addr(virt_addr);
+            bar.set_virt_addr(virt_addr);
         }
+
+        // TODO: enable bus mastering (?)
 
         Self {
             bar0,
