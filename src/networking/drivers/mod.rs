@@ -132,7 +132,7 @@ impl<'a> E1000<'a> {
 
         match &self.bar0 {
             AnyBAR::IO(_) => {
-                println!("ERROR: Trying to read MAC without EEPROM!");
+                println!("ERROR: Trying to read the MAC of IO BAR without an EEPROM!");
                 return false;
             }
             AnyBAR::Mem(mem) => {
