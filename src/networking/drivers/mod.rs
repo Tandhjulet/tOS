@@ -54,11 +54,19 @@ impl E1000 {
 
         let is_io_bar = bar_type == 1;
 
+        // TOD: move this into the PciDevice impl
         let (io_bar_addr, mem_base): (u16, u64) = if is_io_bar {
-            // IO Bar
+            // I/O Space BAR layout
+            // Bits 31-2						Bit 1		Bit 0
+            // 4-Byte Aligned Base Address		Reserved	Always 1
+
             let io_bar_addr = (bar0 & 0xFFFFFFFC) as u16;
             (io_bar_addr, 0)
         } else {
+            // Memory Space BAR layout:
+            // Bits 31-4						Bit 3			Bits 2-1	Bit 0
+            // 16-Byte Aligned Base Address		Prefetchable	Type		Always 0
+
             let mem_type = (bar0 >> 1) & 0x3;
             let mem_base;
 
@@ -74,6 +82,8 @@ impl E1000 {
 
             (0, mem_base)
         };
+
+        // TODO: map phys -> virt addrs so we can access
 
         Self {
             bar_type,
