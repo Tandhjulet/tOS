@@ -1,10 +1,7 @@
-use crate::{gdt, hlt_loop, print, println};
-use lazy_static::lazy_static;
+use crate::{gdt, hlt_loop, println};
 use pic8259::ChainedPics;
 use spin::Mutex;
-use x86_64::structures::idt::{
-    Entry, HandlerFuncType, InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode,
-};
+use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
 
 pub const PIC_1_OFFSET: u8 = 32;
 pub const PIC_2_OFFSET: u8 = PIC_1_OFFSET + 8;
@@ -29,25 +26,24 @@ impl InterruptIndex {
     }
 }
 
-lazy_static! {
-    pub static ref IDT: Mutex<InterruptDescriptorTable> = Mutex::new({
-        let mut idt = InterruptDescriptorTable::new();
-        idt.breakpoint.set_handler_fn(breakpoint_handler);
-        unsafe {
-            idt.double_fault
-                .set_handler_fn(double_fault_handler)
-                .set_stack_index(gdt::DOUBLE_FAULT_IST_INDEX);
-        }
+pub static IDT: Mutex<InterruptDescriptorTable> = Mutex::new(InterruptDescriptorTable::new());
 
-        idt.page_fault.set_handler_fn(page_fault_handler);
+pub fn init_idt() {
+    let mut idt = IDT.lock();
+    idt.breakpoint.set_handler_fn(breakpoint_handler);
+    unsafe {
+        idt.double_fault
+            .set_handler_fn(double_fault_handler)
+            .set_stack_index(gdt::DOUBLE_FAULT_IST_INDEX);
+    }
+    idt.page_fault.set_handler_fn(page_fault_handler);
+    idt[InterruptIndex::Timer.as_usize()].set_handler_fn(timer_interrupt_handler);
+    idt[InterruptIndex::Keyboard.as_usize()].set_handler_fn(keyboard_interrupt_handler);
 
-        // FIXME: make a dynamic fn register_handler instead of this
-        idt[InterruptIndex::Timer.as_usize()].set_handler_fn(timer_interrupt_handler);
-        idt[InterruptIndex::Keyboard.as_usize()].set_handler_fn(keyboard_interrupt_handler);
-        idt
-    });
+    // create a &'static reference to the underlying IDT for loading
+    let idt_static: &'static InterruptDescriptorTable = unsafe { &*(&*IDT.lock() as *const _) };
+    idt_static.load();
 }
-
 extern "x86-interrupt" fn page_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: PageFaultErrorCode,
@@ -90,10 +86,6 @@ extern "x86-interrupt" fn double_fault_handler(
     _error_code: u64,
 ) -> ! {
     panic!("EXCEPTION: DOUBLE FAULT\n{:#?}", stack_frame);
-}
-
-pub fn init_idt() {
-    IDT.load();
 }
 
 #[test_case]

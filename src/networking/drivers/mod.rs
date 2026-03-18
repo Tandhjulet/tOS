@@ -1,4 +1,4 @@
-use x86_64::structures::idt::{InterruptStackFrame, PageFaultErrorCode};
+use x86_64::structures::idt::InterruptStackFrame;
 
 /**
  * See https://www.intel.com/content/dam/doc/manual/pci-pci-x-family-gbe-controllers-software-dev-manual.pdf#page389

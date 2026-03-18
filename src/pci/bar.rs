@@ -113,15 +113,6 @@ impl<'a> MemBar<'a> {
         !MemBar::is_32(raw)
     }
 
-    fn addr(raw: u32) -> u64 {
-        if MemBar::is_64(raw) {
-            panic!("64-bit BARs are unsupported!");
-        }
-
-        let bar_low = raw & 0xFFFFFFF0;
-        bar_low as u64
-    }
-
     pub fn set_virt_addr(&mut self, addr: VirtAddr) {
         self.virt_addr = addr;
     }
