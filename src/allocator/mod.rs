@@ -16,8 +16,8 @@ use crate::allocator::{memory::BootInfoFrameAllocator, paging::FixedSizeBlockAll
 pub const HEAP_START: usize = 0x_4444_4444_0000;
 pub const HEAP_SIZE: usize = 100 * 1024; // 100 KiB
 
-static MAPPER: Mutex<Option<OffsetPageTable<'static>>> = Mutex::new(None);
-static FRAME_ALLOCATOR: Mutex<Option<BootInfoFrameAllocator>> = Mutex::new(None);
+pub static MAPPER: Mutex<Option<OffsetPageTable<'static>>> = Mutex::new(None);
+pub static FRAME_ALLOCATOR: Mutex<Option<BootInfoFrameAllocator>> = Mutex::new(None);
 
 pub fn init(boot_info: &'static BootInfo) -> Result<(), MapToError<Size4KiB>> {
     let phys_mem_offset = VirtAddr::new(boot_info.physical_memory_offset);
@@ -78,4 +78,4 @@ impl<A> Locked<A> {
 }
 
 #[global_allocator]
-static ALLOCATOR: Locked<FixedSizeBlockAllocator> = Locked::new(FixedSizeBlockAllocator::new());
+pub static ALLOCATOR: Locked<FixedSizeBlockAllocator> = Locked::new(FixedSizeBlockAllocator::new());

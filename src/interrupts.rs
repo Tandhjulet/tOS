@@ -26,6 +26,9 @@ impl InterruptIndex {
     }
 }
 
+// FIXME: dont use a Mutex here... instead, use something like:
+// static HANDLERS: Mutex<[Option<fn()>; 256]> = Mutex::new([None; 256]);
+// and then generate 256 functions as unique handlers for each IRQ number using a macro
 pub static IDT: Mutex<InterruptDescriptorTable> = Mutex::new(InterruptDescriptorTable::new());
 
 pub fn init_idt() {
@@ -37,13 +40,15 @@ pub fn init_idt() {
             .set_stack_index(gdt::DOUBLE_FAULT_IST_INDEX);
     }
     idt.page_fault.set_handler_fn(page_fault_handler);
+
+    // FIXME: don't hardcode... create a registrar
     idt[InterruptIndex::Timer.as_usize()].set_handler_fn(timer_interrupt_handler);
     idt[InterruptIndex::Keyboard.as_usize()].set_handler_fn(keyboard_interrupt_handler);
 
-    // create a &'static reference to the underlying IDT for loading
-    let idt_static: &'static InterruptDescriptorTable = unsafe { &*(&*IDT.lock() as *const _) };
+    let idt_static: &'static InterruptDescriptorTable = unsafe { &*(&*idt as *const _) };
     idt_static.load();
 }
+
 extern "x86-interrupt" fn page_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: PageFaultErrorCode,
