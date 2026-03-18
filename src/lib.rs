@@ -7,6 +7,7 @@
 
 pub mod allocator;
 pub mod gdt;
+pub mod helpers;
 pub mod interrupts;
 pub mod networking;
 pub mod pci;

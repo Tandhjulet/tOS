@@ -17,21 +17,34 @@ lazy_static! {
     pub static ref DEVICES: Vec<PciDevice> = check_all_buses();
 }
 
+// See https://wiki.osdev.org/PCI#Header_Type_0x0
+const HEADER0_LINE2_OFFSET: u8 = 0x8;
+const HEADER0_LINE3_OFFSET: u8 = 0xC;
+const HEADER0_LINE15_OFFSET: u8 = 0xF;
+
 #[derive(Debug, Clone, Copy)]
 pub struct PciDevice {
-    pub vendor_id: u16,
-    pub device_id: u16,
-
     pub bus: u8,
     pub device: u8,
     pub function: u8,
+
+    // Reg 0x0 @ Offset 0x0
+    pub vendor_id: u16,
+    pub device_id: u16,
+
+    // Reg 0x2 @ Offset 0x8
     pub class: u8,
     pub subclass: u8,
 
+    // Reg 0x3 @ Offset 0xC
     pub header_type: u8,
     pub latency: u8,
     pub cache_line_size: u8,
     pub bist: u8,
+
+    // Reg 0xF @ 0x3C
+    pub interrupt_pin: u8,
+    pub interrupt_line: u8,
 }
 
 impl PciDevice {
@@ -111,7 +124,7 @@ fn check_device(bus: u8, device: u8, devices: &mut Vec<PciDevice>) {
         return;
     }
 
-    let header = ((pci_read(bus, device, 0, 0xC) >> 16) & 0xFF) as u8;
+    let header = ((pci_read(bus, device, 0, HEADER0_LINE3_OFFSET) >> 16) & 0xFF) as u8;
     if (header & 0x80) != 0 {
         for function in 1..8 {
             if let Some(dev) = check_function(bus, device, function) {
@@ -130,17 +143,17 @@ fn check_function(bus: u8, device: u8, function: u8) -> Option<PciDevice> {
 
     let device_id = (id >> 16) as u16;
 
-    let class_reg = pci_read(bus, device, function, 0x08);
+    let class_reg = pci_read(bus, device, function, HEADER0_LINE2_OFFSET);
     let class = ((class_reg >> 24) & 0xFF) as u8;
     let subclass = ((class_reg >> 16) & 0xFF) as u8;
 
-    let meta = pci_read(bus, device, function, 0xC);
-    let cache_line_size = (meta & 0xFF) as u8;
-    let latency = ((meta >> 8) & 0xFF) as u8;
-    let header_type = ((meta >> 16) & 0xFF) as u8;
-    let bist = ((meta >> 24) & 0xFF) as u8;
+    let line3 = pci_read(bus, device, function, HEADER0_LINE3_OFFSET);
+    let (bist, header_type, latency, cache_line_size) = unpack_quad(line3);
 
-    // https://wiki.osdev.org/PCI#Class_Codes
+    // Line 0xF always contains interrupt pin and interrupts line
+    let line15 = pci_read(bus, device, function, HEADER0_LINE15_OFFSET);
+    let (_, _, interrupt_pin, interrupt_line) = unpack_quad(line15);
+
     Some(PciDevice {
         bus,
         device,
@@ -153,7 +166,18 @@ fn check_function(bus: u8, device: u8, function: u8) -> Option<PciDevice> {
         latency,
         header_type,
         bist,
+        interrupt_line,
+        interrupt_pin,
     })
+}
+
+fn unpack_quad(val: u32) -> (u8, u8, u8, u8) {
+    let first = (val & 0xFF) as u8;
+    let second = ((val >> 8) & 0xFF) as u8;
+    let third = ((val >> 16) & 0xFF) as u8;
+    let fourth = ((val >> 24) & 0xFF) as u8;
+
+    (fourth, third, second, first)
 }
 
 fn get_addr(bus: u8, device: u8, func: u8, offset: u8) -> u32 {

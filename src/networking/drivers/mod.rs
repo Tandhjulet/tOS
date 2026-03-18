@@ -1,11 +1,14 @@
+use x86_64::structures::idt::{InterruptStackFrame, PageFaultErrorCode};
+
 /**
- * See https://wiki.osdev.org/Intel_Ethernet_i217 for documentation
+ * See https://www.intel.com/content/dam/doc/manual/pci-pci-x-family-gbe-controllers-software-dev-manual.pdf#page389
+ * or (https://wiki.osdev.org/Intel_Ethernet_i217) for documentation
  * details regarding the implementation of the E1000 driver.
  */
-use x86_64::PhysAddr;
-
 use crate::{
     allocator::mmio,
+    helpers,
+    interrupts::IDT,
     networking::NetworkDriver,
     pci::{
         PciDevice,
@@ -17,7 +20,20 @@ use crate::{
 const E1000_NUM_RX_DESC: usize = 32;
 const E1000_NUM_TX_DESC: usize = 8;
 
-const REG_EEPROM: u16 = 0x0014;
+// Refer to https://www.intel.com/content/dam/doc/manual/pci-pci-x-family-gbe-controllers-software-dev-manual.pdf#page389
+// Table 13-2:
+const REG_CTRL: u16 = 0x0; // Device Control
+const REG_STATUS: u16 = 0x0008; // Device Status
+const REG_TXCW: u16 = 0x0178; // Transmit Configuration
+const REG_EEPROM: u16 = 0x0014; // EEPROM Read
+const REG_RCTL: u16 = 0x0100; // Receive Control
+const REG_TCTL: u16 = 0x0400; // Transmit Control
+
+const REG_I_MASK: u16 = 0x00D0; // Interrupt Mask Set/Read
+const REG_I_READ: u16 = 0xC0;
+
+const MTA_LENGTH: usize = 128;
+const REG_MTA: [u16; MTA_LENGTH] = helpers::build_range::<MTA_LENGTH>(0x5200, 4); // Multicast Table Array 
 
 pub struct E1000RxDesc {
     addr: u64,
@@ -39,6 +55,7 @@ pub struct E1000TxDesc {
 }
 
 pub struct E1000<'a> {
+    device: &'a PciDevice,
     bar0: AnyBAR<'a>,
     eeprom_exists: bool,
     mac: [u8; 6],
@@ -67,6 +84,7 @@ impl<'a> E1000<'a> {
         // TODO: enable bus mastering (?)
 
         Self {
+            device,
             bar0,
             eeprom_exists: false,
             mac: [0; 6],
@@ -165,6 +183,28 @@ impl<'a> E1000<'a> {
         }
         println!();
     }
+
+    pub fn clear_mta(&mut self) {
+        for addr in REG_MTA {
+            unsafe {
+                self.bar0.write_command(addr, 0x0);
+            };
+        }
+    }
+
+    pub fn enable_interrupts(&mut self) {
+        unsafe {
+            self.bar0.write_command(REG_I_MASK, 0x1F6DC);
+            self.bar0.write_command(REG_I_MASK, 0xFF & !4);
+
+            // read to clear all reg bits
+            self.bar0.read_command(REG_I_READ);
+        }
+    }
+
+    extern "x86-interrupt" fn fire(stack_frame: InterruptStackFrame) {
+        println!("interrupt registered!");
+    }
 }
 
 impl NetworkDriver for E1000<'_> {
@@ -175,10 +215,12 @@ impl NetworkDriver for E1000<'_> {
         }
 
         self.print_mac();
-    }
+        self.clear_mta();
 
-    fn fire(&mut self, frame: x86_64::structures::idt::InterruptStackFrame) {
-        todo!()
+        let interrupt_line = self.device.interrupt_line;
+        IDT.lock()[usize::from(interrupt_line)].set_handler_fn(E1000::fire);
+
+        self.enable_interrupts();
     }
 
     fn get_mac_addr(&self) -> [u8; 6] {
