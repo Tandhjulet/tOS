@@ -13,7 +13,7 @@ use x86_64::{
 use crate::{
     allocator::{self, ALLOCATOR, mmio},
     helpers,
-    interrupts::IDT,
+    interrupts::{IDT, MIN_INTERRUPT},
     networking::NetworkDriver,
     pci::{
         PciDevice,
@@ -172,7 +172,9 @@ pub struct E1000<'a> {
 }
 
 impl<'a> E1000<'a> {
-    pub fn new(device: &'a PciDevice) -> Self {
+    pub fn new(device: &'a mut PciDevice) -> Self {
+        device.enable_bus_mastering();
+
         // https://wiki.osdev.org/PCI#Base_Address_Registers
 
         let mut bar0 = device.get_bar(0);
@@ -188,6 +190,7 @@ impl<'a> E1000<'a> {
         }
 
         // TODO: enable bus mastering to enable DMA so the NIC can access RX and TX descriptors
+        // https://wiki.osdev.org/PCI#Command_Register
 
         Self {
             device,
@@ -321,7 +324,6 @@ impl<'a> E1000<'a> {
         for i in 0..E1000_NUM_RX_DESC {
             let buf_ptr: *mut u8 = unsafe { ALLOCATOR.alloc(buf_layout) };
             assert!(!buf_ptr.is_null(), "Failed to allocate RX buffer");
-            println!("successfully alloced {:#?}", buf_ptr);
 
             let buf_phys = mapper
                 .translate_addr(VirtAddr::new(buf_ptr as u64))
@@ -416,7 +418,7 @@ impl NetworkDriver for E1000<'_> {
         self.clear_mta();
 
         let interrupt_line = self.device.interrupt_line;
-        IDT.lock()[usize::from(interrupt_line)].set_handler_fn(E1000::fire);
+        IDT.lock()[usize::from(interrupt_line) + MIN_INTERRUPT].set_handler_fn(E1000::fire);
 
         self.enable_interrupts();
         self.rx_init();

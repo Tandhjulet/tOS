@@ -4,9 +4,10 @@ use core::fmt;
 
 use alloc::vec::Vec;
 use lazy_static::lazy_static;
+use spin::Mutex;
 use x86_64::instructions::port::Port;
 
-use crate::pci::bar::AnyBAR;
+use crate::{pci::bar::AnyBAR, print};
 
 const CONFIG_ADDRESS: u16 = 0xCF8;
 const CONFIG_DATA: u16 = 0xCFC;
@@ -14,13 +15,30 @@ const CONFIG_DATA: u16 = 0xCFC;
 const BAR_OFFSETS: &[u8] = &[0x10, 0x14, 0x18, 0x1C, 0x20, 0x24];
 
 lazy_static! {
-    pub static ref DEVICES: Vec<PciDevice> = check_all_buses();
+    pub static ref DEVICES: Mutex<Vec<PciDevice>> = Mutex::new(check_all_buses());
 }
 
 // See https://wiki.osdev.org/PCI#Header_Type_0x0
+const HEADER0_LINE0_OFFSET: u8 = 0x0;
+const HEADER0_LINE1_OFFSET: u8 = 0x4;
 const HEADER0_LINE2_OFFSET: u8 = 0x8;
 const HEADER0_LINE3_OFFSET: u8 = 0xC;
-const HEADER0_LINE15_OFFSET: u8 = 0xF;
+const HEADER0_LINE15_OFFSET: u8 = 0x3C;
+
+//
+// Command Register flags
+// (See https://wiki.osdev.org/PCI#Command_Register for overview)
+//
+const CMD_IO: u16 = 1 << 0; // Enable IO Space accesses
+const CMD_MEM: u16 = 1 << 1; // Enable MEM Space access
+const CMD_BUS_MASTER: u16 = 1 << 2; // Enable Bus Mastering
+const CMD_SC: u16 = 1 << 3; // Enable monitor for Special Cycle ops
+const CMD_MEM_WRITE: u16 = 1 << 4; // Enable the device to generate mem write and invalidate commands
+const CMD_VGA_PALETTE: u16 = 1 << 5; // If set, the device will not respond to palette reg writes but instead snoop the data
+const CMD_PARITY_ERR: u16 = 1 << 6; // If set, the device will take normal action when parity err is detected
+const CMD_SERR: u16 = 1 << 8; // If set, SERR# driver is enabled
+const CMD_FBBE: u16 = 1 << 9; // If set, the device can generate fast back-to-back transactions
+const CMD_INTERRUPT: u16 = 1 << 10; // If set, the devices INTx# signal is disabled
 
 #[derive(Debug, Clone, Copy)]
 pub struct PciDevice {
@@ -31,6 +49,10 @@ pub struct PciDevice {
     // Reg 0x0 @ Offset 0x0
     pub vendor_id: u16,
     pub device_id: u16,
+
+    // Reg 0x1 @ Offset 0x4
+    pub status: u16,
+    pub command: u16,
 
     // Reg 0x2 @ Offset 0x8
     pub class: u8,
@@ -83,9 +105,16 @@ impl PciDevice {
         }
 
         let offset = self.get_bar_offset(bar as usize);
-        let bar = pci_read(self.bus, self.device, self.function, offset);
+        let bar = self.read(offset);
 
         AnyBAR::from_raw(bar, offset, self)
+    }
+
+    pub fn enable_bus_mastering(&mut self) {
+        self.command |= CMD_BUS_MASTER;
+
+        let val = ((self.status as u32) << 16) | (self.command as u32);
+        self.write(HEADER0_LINE1_OFFSET, val);
     }
 }
 
@@ -135,13 +164,17 @@ fn check_device(bus: u8, device: u8, devices: &mut Vec<PciDevice>) {
 }
 
 fn check_function(bus: u8, device: u8, function: u8) -> Option<PciDevice> {
-    let id: u32 = pci_read(bus, device, function, 0x0);
+    let id: u32 = pci_read(bus, device, function, HEADER0_LINE0_OFFSET);
     let vendor_id = (id & 0xFFFF) as u16;
     if vendor_id == 0xFFFF {
         return None;
     }
 
     let device_id = (id >> 16) as u16;
+
+    let class_reg = pci_read(bus, device, function, HEADER0_LINE1_OFFSET);
+    let command = (class_reg & 0xFFFF) as u16;
+    let status = (class_reg >> 16) as u16;
 
     let class_reg = pci_read(bus, device, function, HEADER0_LINE2_OFFSET);
     let class = ((class_reg >> 24) & 0xFF) as u8;
@@ -152,11 +185,14 @@ fn check_function(bus: u8, device: u8, function: u8) -> Option<PciDevice> {
 
     // Line 0xF always contains interrupt pin and interrupts line
     let line15 = pci_read(bus, device, function, HEADER0_LINE15_OFFSET);
+    print!("line15: 0x{:04x} ({}: {})", line15, class, subclass);
     let (_, _, interrupt_pin, interrupt_line) = unpack_quad(line15);
 
     Some(PciDevice {
         bus,
         device,
+        command,
+        status,
         function,
         vendor_id,
         device_id,

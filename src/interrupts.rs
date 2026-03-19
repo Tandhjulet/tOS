@@ -3,7 +3,8 @@ use pic8259::ChainedPics;
 use spin::Mutex;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
 
-pub const PIC_1_OFFSET: u8 = 32;
+pub const MIN_INTERRUPT: usize = 32;
+pub const PIC_1_OFFSET: u8 = MIN_INTERRUPT as u8;
 pub const PIC_2_OFFSET: u8 = PIC_1_OFFSET + 8;
 
 pub static PICS: spin::Mutex<ChainedPics> =

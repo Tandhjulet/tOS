@@ -54,4 +54,12 @@ test-args = [
 	"-display",
 	"none",
 ]
+run-args = [
+	"-netdev",
+	"user,id=net0",
+	"-device",
+	"e1000,netdev=net0",
+	"-serial",
+	"stdio",
+]
 test-success-exit-code = 33 # (0x10 << 1) | 1

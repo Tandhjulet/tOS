@@ -3,18 +3,15 @@ pub mod drivers;
 use crate::networking::drivers::E1000;
 
 pub fn init() {
-    let pci_devices = &crate::pci::DEVICES;
+    let mut devices = crate::pci::DEVICES.lock();
 
     // https://wiki.osdev.org/PCI#Class_Codes
-    let network_controller: Option<&crate::pci::PciDevice> = pci_devices
-        .iter()
-        .find(|device| device.class == 0x2 && device.subclass == 0x0);
+    let device = devices
+        .iter_mut()
+        .find(|d| d.class == 0x2 && d.subclass == 0x0);
 
-    if network_controller.is_none() {
-        return;
-    }
+    let Some(device) = device else { return };
 
-    let device = network_controller.unwrap();
     // TODO: dynamic load
     let mut driver = E1000::new(device);
     driver.start();
