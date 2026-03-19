@@ -2,19 +2,14 @@
 
 A very much work-in-progress OS & kernel for learning rust, x86-64 asm and C.
 
-i want: (totally realistic)
+the current road map is:
 
-- TCP/IP stack
+- implement a network stack (WIP)
+    - impl. ARP, IP, ICMP/UDP/TCP (and perhaps SSL/TLS, HTTP(S))
+- shell
+- file system
+- GUI
 - own bootloader (that works with UEFI)
-- some sort of shell (?)
-- filesystem maybe (?)
-- actually make the os
-- permission rings (?)
-
-more realistic:
-
-- come up with something myself to write text to the screen (that's not the vga buffer).
-- make own exception handler + idt impl. (https://os.phil-opp.com/catching-exceptions/)
 
 ## Environment
 
