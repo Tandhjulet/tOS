@@ -100,6 +100,10 @@ const TSTA_EC: u8 = 1 << 1; // Express Collisions
 const TSTA_LC: u8 = 1 << 2; // Late Collision
 const TSTA_TU: u8 = 1 << 3; // Transmit Underrun
 
+const CMD_EOP: u8 = 1 << 0;
+const CMD_IFCS: u8 = 1 << 1;
+const CMD_RS: u8 = 1 << 3;
+
 // INTERRUPTS
 const REG_I_MASK: u16 = 0x00D0; // Interrupt Mask Set/Read
 const REG_I_READ: u16 = 0xC0;
@@ -173,9 +177,8 @@ pub struct E1000<'a> {
 
 impl<'a> E1000<'a> {
     pub fn new(device: &'a mut PciDevice) -> Self {
+        // enable bus mastering to enable DMA so the NIC can access receive and transmit descriptors
         device.enable_bus_mastering();
-
-        // https://wiki.osdev.org/PCI#Base_Address_Registers
 
         let mut bar0 = device.get_bar(0);
         if let AnyBAR::Mem(ref mut bar) = bar0 {
@@ -188,9 +191,6 @@ impl<'a> E1000<'a> {
 
             bar.set_virt_addr(virt_addr);
         }
-
-        // TODO: enable bus mastering to enable DMA so the NIC can access RX and TX descriptors
-        // https://wiki.osdev.org/PCI#Command_Register
 
         Self {
             device,
@@ -398,12 +398,13 @@ impl<'a> E1000<'a> {
                 | TCTL_RTLC;
             self.bar0.write_command(REG_T_CTRL, flags);
 
+            // TODO: why?
             self.bar0.write_command(0x0410, 0x0060200A);
         };
     }
 
     extern "x86-interrupt" fn fire(stack_frame: InterruptStackFrame) {
-        println!("interrupt registered!");
+        todo!()
     }
 }
 
@@ -431,6 +432,27 @@ impl NetworkDriver for E1000<'_> {
     }
 
     fn send_packet(&mut self, data: &[u8]) -> Result<(), &'static str> {
-        todo!()
+        let guard = allocator::MAPPER.lock();
+        let mapper = guard.as_ref().unwrap();
+
+        let phys_addr = mapper
+            .translate_addr(VirtAddr::new(data.as_ptr() as u64))
+            .ok_or("failed to translate TX buffer addr")?;
+
+        let curr_idx = self.tx_cur as usize;
+        self.tx_descs[curr_idx].addr = phys_addr.as_u64();
+        self.tx_descs[curr_idx].length = data.len() as u16;
+        self.tx_descs[curr_idx].cmd = 0x0;
+        self.tx_descs[curr_idx].status = CMD_EOP | CMD_IFCS | CMD_RS;
+
+        let old_idx = curr_idx;
+        self.tx_cur = (self.tx_cur + 1) % (E1000_NUM_TX_DESC as u16);
+        unsafe {
+            self.bar0
+                .write_command(REG_TX_DESC_TAIL, self.tx_cur as u32)
+        };
+
+        while self.tx_descs[old_idx].status & TSTA_DD == 0 {}
+        Ok(())
     }
 }
