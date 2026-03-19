@@ -37,14 +37,17 @@ const REG_R_CTRL: u16 = 0x0100; // Receive Control
 const REG_RX_DESC_LO: u16 = 0x2800; // Receive Descriptor Base Low
 const REG_RX_DESC_HI: u16 = 0x2804; // Receive Descriptor Base High
 
+const REG_RX_DESC_LEN: u16 = 0x2808;
+const REG_RX_DESC_HEAD: u16 = 0x2810;
+const REG_RX_DESC_TAIL: u16 = 0x2818;
+
 const REG_T_CTRL: u16 = 0x0400; // Transmit Control
 const REG_TX_DESC_LO: u16 = 0x3800; // Transmit Descriptor Base Low
 const REG_TX_DESC_HI: u16 = 0x3804; // Transmit Descriptor Base High
 
-const REG_RX_DESC_LEN: u16 = 0x2808;
-
-const REG_RX_DESC_HEAD: u16 = 0x2810;
-const REG_RX_DESC_TAIL: u16 = 0x2818;
+const REG_TX_DESC_LEN: u16 = 0x3808;
+const REG_TX_DESC_HEAD: u16 = 0x3810;
+const REG_TX_DESC_TAIL: u16 = 0x3818;
 
 //
 // REG_R_CTRL (Receive Control) FLAGS (see 13.4.22 intel docs)
@@ -81,6 +84,21 @@ const RCTL_CFI: u32 = 1 << 20; // Canonical Form Indicator Bit Value
 const RCTL_DPF: u32 = 1 << 22; // Discard Pause Frames
 const RCTL_PMCF: u32 = 1 << 23; // Pass MAC Control Frames
 const RCTL_SECRC: u32 = 1 << 26; // Strip Ethernet CRC
+
+//
+// TCTL (Transmit Control) FLAGS (See 13.4.33 Intel docs)
+//
+const TCTL_EN: u32 = 0x1 << 1; // Transmit Enable
+const TCTL_PSP: u32 = 0x1 << 3; // Pad Short Packets
+const TCTL_CT_SHIFT: u32 = 4; // Collision Threshold
+const TCTL_COLD_SHIFT: u32 = 12; // Collision Distance
+const TCTL_SWXOFF: u32 = 1 << 22; // Software XOFF Transmission
+const TCTL_RTLC: u32 = 1 << 24; // Re-transmit on Late Collision
+
+const TSTA_DD: u8 = 1 << 0; // Descriptor Done
+const TSTA_EC: u8 = 1 << 1; // Express Collisions
+const TSTA_LC: u8 = 1 << 2; // Late Collision
+const TSTA_TU: u8 = 1 << 3; // Transmit Underrun
 
 // INTERRUPTS
 const REG_I_MASK: u16 = 0x00D0; // Interrupt Mask Set/Read
@@ -169,7 +187,7 @@ impl<'a> E1000<'a> {
             bar.set_virt_addr(virt_addr);
         }
 
-        // TODO: enable bus mastering (?)
+        // TODO: enable bus mastering to enable DMA so the NIC can access RX and TX descriptors
 
         Self {
             device,
@@ -190,6 +208,7 @@ impl<'a> E1000<'a> {
         for _ in 0..1000 {
             if unsafe { self.bar0.read_command(REG_EEPROM) } & 0x10 > 0 {
                 self.eeprom_exists = true;
+                break;
             }
         }
 
@@ -319,8 +338,9 @@ impl<'a> E1000<'a> {
             self.bar0
                 .write_command(REG_RX_DESC_HI, (raw_phys_rx >> 32) as u32);
 
+            let rx_desc_size = size_of::<E1000RxDesc>();
             self.bar0
-                .write_command(REG_RX_DESC_LEN, (E1000_NUM_RX_DESC * 16) as u32);
+                .write_command(REG_RX_DESC_LEN, (E1000_NUM_RX_DESC * rx_desc_size) as u32);
 
             self.bar0.write_command(REG_RX_DESC_HEAD, 0);
             self.bar0
@@ -338,6 +358,45 @@ impl<'a> E1000<'a> {
                 | RCTL_BSIZE_8192;
 
             self.bar0.write_command(REG_R_CTRL, flags);
+        };
+    }
+
+    pub fn tx_init(&mut self) {
+        let guard = allocator::MAPPER.lock();
+        let mapper = guard.as_ref().unwrap();
+
+        let raw_tx_addr = self.tx_descs.as_ptr() as u64;
+        let phys_tx_addr = mapper.translate_addr(VirtAddr::new(raw_tx_addr)).unwrap();
+        let raw_phys_tx = phys_tx_addr.as_u64();
+
+        for i in 0..E1000_NUM_TX_DESC {
+            self.tx_descs[i].addr = 0;
+            self.tx_descs[i].cmd = 0;
+            self.tx_descs[i].status = TSTA_DD;
+        }
+
+        unsafe {
+            self.bar0
+                .write_command(REG_TX_DESC_LO, (raw_phys_tx & 0xFFFFFFFF) as u32);
+            self.bar0
+                .write_command(REG_TX_DESC_HI, (raw_phys_tx >> 32) as u32);
+
+            let tx_desc_size = size_of::<E1000TxDesc>();
+            self.bar0
+                .write_command(REG_TX_DESC_LEN, (E1000_NUM_TX_DESC * tx_desc_size) as u32);
+
+            self.bar0.write_command(REG_TX_DESC_HEAD, 0);
+            self.bar0.write_command(REG_TX_DESC_TAIL, 0);
+
+            let flags = 0x0
+                | TCTL_EN
+                | TCTL_PSP
+                | (0xF << TCTL_CT_SHIFT)
+                | (64 << TCTL_COLD_SHIFT)
+                | TCTL_RTLC;
+            self.bar0.write_command(REG_T_CTRL, flags);
+
+            self.bar0.write_command(0x0410, 0x0060200A);
         };
     }
 
@@ -361,6 +420,8 @@ impl NetworkDriver for E1000<'_> {
 
         self.enable_interrupts();
         self.rx_init();
+        self.tx_init();
+        print!("E1000 started!");
     }
 
     fn get_mac_addr(&self) -> [u8; 6] {
