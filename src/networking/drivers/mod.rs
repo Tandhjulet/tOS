@@ -46,13 +46,26 @@ const REG_RX_DESC_LEN: u16 = 0x2808;
 const REG_RX_DESC_HEAD: u16 = 0x2810;
 const REG_RX_DESC_TAIL: u16 = 0x2818;
 
-// RX FLAGS (see 13.4.22 intel docs)
+//
+// REG_R_CTRL (Receive Control) FLAGS (see 13.4.22 intel docs)
+//
 const RCTL_EN: u32 = 1 << 1; // Enable Receiver
 const RCTL_SBP: u32 = 1 << 2; // Store Bad Packets
 const RCTL_UPE: u32 = 1 << 3; // Unicast Promiscuous Enabled
 const RCTL_MPE: u32 = 1 << 4; // Multicast Promiscuous Enabled
 const RCTL_LPE: u32 = 1 << 5; // Long Packet Reception Enable
-// TODO: implement
+// Loopback Mode
+const RCTL_LBM_NONE: u32 = 0 << 6; // No Loopback
+const RCTL_LBM_PHY: u32 = 0b11 << 6; // PHY or external SerDesc loopback
+// Receive Descriptor Minimum Threshold Size
+const RCTL_RDMTS_HALF: u32 = 0 << 8; // Threshold is 1/2 of total RX circular desc buffer
+const RCTL_RDMTS_QUARTER: u32 = 1 << 8; // Threshold is 1/4 of total RX circular desc buffer
+const RCTL_RDMTS_EIGHT: u32 = 2 << 8; // Threshold is 1/8 of total RX circular desc buffer
+// Multicast Offset
+const RCTL_MO_36: u32 = 0 << 12; // Use bits 47:36
+const RCTL_MO_35: u32 = 1 << 12; // Use bits 47:35
+const RCTL_MO_34: u32 = 2 << 12; // Use bits 47:34
+const RCTL_MO_32: u32 = 3 << 12; // Use bits 47:32
 const RCTL_BAM: u32 = 1 << 15; // Broadcast Accept Mode
 // Buffer sizes
 const RCTL_BSIZE_256: u32 = 3 << 16;
@@ -289,6 +302,7 @@ impl<'a> E1000<'a> {
         for i in 0..E1000_NUM_RX_DESC {
             let buf_ptr: *mut u8 = unsafe { ALLOCATOR.alloc(buf_layout) };
             assert!(!buf_ptr.is_null(), "Failed to allocate RX buffer");
+            println!("successfully alloced {:#?}", buf_ptr);
 
             let buf_phys = mapper
                 .translate_addr(VirtAddr::new(buf_ptr as u64))
@@ -296,18 +310,14 @@ impl<'a> E1000<'a> {
 
             let desc = &mut self.rx_descs[i];
             desc.addr = buf_phys.as_u64();
+            desc.status = 0;
         }
 
         unsafe {
-            // FIXME: why is this reversed?
             self.bar0
-                .write_command(REG_TX_DESC_LO, (raw_phys_rx >> 32) as u32);
+                .write_command(REG_RX_DESC_LO, (raw_phys_rx & 0xFFFF_FFFF) as u32);
             self.bar0
-                .write_command(REG_TX_DESC_HI, (raw_phys_rx & 0xFFFF_FFFF) as u32);
-
-            // IDK ? pr intel docs it should be akin to upper
-            self.bar0.write_command(REG_RX_DESC_LO, raw_phys_rx as u32);
-            self.bar0.write_command(REG_RX_DESC_HI, 0x0);
+                .write_command(REG_RX_DESC_HI, (raw_phys_rx >> 32) as u32);
 
             self.bar0
                 .write_command(REG_RX_DESC_LEN, (E1000_NUM_RX_DESC * 16) as u32);
@@ -316,11 +326,19 @@ impl<'a> E1000<'a> {
             self.bar0
                 .write_command(REG_RX_DESC_TAIL, (E1000_NUM_RX_DESC - 1) as u32);
 
-            // TODO: define and use flags
-            let flags = 0x0;
+            let flags = 0x0
+                | RCTL_EN
+                | RCTL_SBP
+                | RCTL_UPE
+                | RCTL_MPE
+                | RCTL_LBM_NONE
+                | RCTL_RDMTS_HALF
+                | RCTL_BAM
+                | RCTL_SECRC
+                | RCTL_BSIZE_8192;
+
             self.bar0.write_command(REG_R_CTRL, flags);
         };
-        // WRIE TO 0x0100h BSIZE (bits 17:16) that RX buffer size = 8192 bytes (write 10b)
     }
 
     extern "x86-interrupt" fn fire(stack_frame: InterruptStackFrame) {
