@@ -1,15 +1,17 @@
 use core::ptr::{read_volatile, write_volatile};
 
+use alloc::sync::Arc;
+use spin::Mutex;
 use x86_64::{PhysAddr, VirtAddr, instructions::port::Port};
 
 use crate::pci::PciDevice;
 
-pub enum AnyBAR<'a> {
-    IO(IOBar<'a>),
-    Mem(MemBar<'a>),
+pub enum AnyBAR {
+    IO(IOBar),
+    Mem(MemBar),
 }
 
-impl<'a> AnyBAR<'a> {
+impl AnyBAR {
     pub fn size(&self) -> u32 {
         match self {
             AnyBAR::IO(io) => io.size(),
@@ -17,7 +19,7 @@ impl<'a> AnyBAR<'a> {
         }
     }
 
-    pub fn from_raw(raw: u32, offset: u8, dev: &'a PciDevice) -> Self {
+    pub fn from_raw(raw: u32, offset: u8, dev: Arc<Mutex<PciDevice>>) -> Self {
         let is_io: bool = (raw & 0x1) == 0x1;
         if is_io {
             AnyBAR::IO(IOBar::new(raw, offset, dev))
@@ -48,7 +50,7 @@ impl<'a> AnyBAR<'a> {
 pub trait BAR {
     type AddrType;
 
-    fn device(&self) -> &PciDevice;
+    fn device(&self) -> &Arc<Mutex<PciDevice>>;
     fn raw(&self) -> u32;
     fn offset(&self) -> u8;
 
@@ -63,13 +65,16 @@ pub trait BAR {
 
     fn addr(&self) -> Self::AddrType;
     fn size(&self) -> u32 {
-        let device = self.device();
         let raw = self.raw();
         let offset = self.offset();
+
+        let device = self.device().lock();
 
         device.write(offset, 0xFFFF_FFFF);
         let mask = device.read(offset);
         device.write(offset, raw);
+
+        drop(device);
 
         if self.is_io() {
             let size = !(mask & 0xFFFF_FFFC) + 1;
@@ -84,10 +89,10 @@ pub trait BAR {
     unsafe fn read_command(&mut self, offset: u16) -> u32;
 }
 
-pub struct IOBar<'a> {
+pub struct IOBar {
     raw: u32,
     offset: u8,
-    dev: &'a PciDevice,
+    dev: Arc<Mutex<PciDevice>>,
 
     port_addr: u16,
 
@@ -95,15 +100,15 @@ pub struct IOBar<'a> {
     port_data: Port<u32>,
 }
 
-pub struct MemBar<'a> {
+pub struct MemBar {
     raw: u32,
-    dev: &'a PciDevice,
+    dev: Arc<Mutex<PciDevice>>,
     offset: u8,
 
     virt_addr: VirtAddr,
 }
 
-impl<'a> MemBar<'a> {
+impl MemBar {
     fn is_32(raw: u32) -> bool {
         let mem_type = (raw >> 1) & 0x3;
         mem_type == 0x0
@@ -121,7 +126,7 @@ impl<'a> MemBar<'a> {
         self.virt_addr
     }
 
-    pub fn new(raw: u32, offset: u8, dev: &'a PciDevice) -> Self {
+    pub fn new(raw: u32, offset: u8, dev: Arc<Mutex<PciDevice>>) -> Self {
         MemBar {
             raw,
             dev,
@@ -134,7 +139,7 @@ impl<'a> MemBar<'a> {
 // Memory Space BAR layout:
 // Bits 31-4						Bit 3			Bits 2-1	Bit 0
 // 16-Byte Aligned Base Address		Prefetchable	Type		Always 0
-impl<'a> BAR for MemBar<'a> {
+impl BAR for MemBar {
     // FIXME: only supporting 32-bit membar addrs
     type AddrType = PhysAddr;
 
@@ -168,8 +173,8 @@ impl<'a> BAR for MemBar<'a> {
         }
     }
 
-    fn device(&self) -> &PciDevice {
-        self.dev
+    fn device(&self) -> &Arc<Mutex<PciDevice>> {
+        &self.dev
     }
 
     fn raw(&self) -> u32 {
@@ -181,12 +186,12 @@ impl<'a> BAR for MemBar<'a> {
     }
 }
 
-impl<'a> IOBar<'a> {
+impl IOBar {
     pub fn addr(raw: u32) -> u16 {
         (raw & 0xFFFFFFFC) as u16
     }
 
-    pub fn new(raw: u32, offset: u8, dev: &'a PciDevice) -> Self {
+    pub fn new(raw: u32, offset: u8, dev: Arc<Mutex<PciDevice>>) -> Self {
         let base_addr = IOBar::addr(raw);
         IOBar {
             raw,
@@ -202,7 +207,7 @@ impl<'a> IOBar<'a> {
 // I/O Space BAR layout
 // Bits 31-2						Bit 1		Bit 0
 // 4-Byte Aligned Base Address		Reserved	Always 1
-impl<'a> BAR for IOBar<'a> {
+impl BAR for IOBar {
     type AddrType = u16;
 
     fn addr(&self) -> Self::AddrType {
@@ -223,8 +228,8 @@ impl<'a> BAR for IOBar<'a> {
         }
     }
 
-    fn device(&self) -> &PciDevice {
-        self.dev
+    fn device(&self) -> &Arc<Mutex<PciDevice>> {
+        &self.dev
     }
 
     fn raw(&self) -> u32 {

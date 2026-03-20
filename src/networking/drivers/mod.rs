@@ -1,7 +1,9 @@
 use core::alloc::{GlobalAlloc, Layout};
 
+use alloc::sync::Arc;
+use spin::Mutex;
 use x86_64::{
-    PhysAddr, VirtAddr, addr,
+    VirtAddr,
     structures::{idt::InterruptStackFrame, paging::Translate},
 };
 
@@ -14,12 +16,12 @@ use crate::{
     allocator::{self, ALLOCATOR, mmio},
     helpers,
     interrupts::{IDT, MIN_INTERRUPT},
-    networking::NetworkDriver,
+    networking::{MacAddr, NetworkDriver},
     pci::{
         PciDevice,
         bar::{AnyBAR, BAR},
     },
-    print, println,
+    println,
 };
 
 const E1000_NUM_RX_DESC: usize = 32;
@@ -164,23 +166,20 @@ impl Default for E1000RxDesc {
     }
 }
 
-pub struct E1000<'a> {
-    device: &'a PciDevice,
-    bar0: AnyBAR<'a>,
+pub struct E1000 {
+    device: Arc<Mutex<PciDevice>>,
+    bar0: AnyBAR,
     eeprom_exists: bool,
-    mac: [u8; 6],
+    mac: MacAddr,
     rx_descs: [E1000RxDesc; E1000_NUM_RX_DESC],
     tx_descs: [E1000TxDesc; E1000_NUM_TX_DESC],
     rx_cur: u16,
     tx_cur: u16,
 }
 
-impl<'a> E1000<'a> {
-    pub fn new(device: &'a mut PciDevice) -> Self {
-        // enable bus mastering to enable DMA so the NIC can access receive and transmit descriptors
-        device.enable_bus_mastering();
-
-        let mut bar0 = device.get_bar(0);
+impl E1000 {
+    pub fn new(device: Arc<Mutex<PciDevice>>) -> Self {
+        let mut bar0 = PciDevice::get_bar(&device, 0);
         if let AnyBAR::Mem(ref mut bar) = bar0 {
             let virt_addr = {
                 let phys_addr = bar.addr();
@@ -196,7 +195,7 @@ impl<'a> E1000<'a> {
             device,
             bar0,
             eeprom_exists: false,
-            mac: [0; 6],
+            mac: MacAddr::default(),
             rx_descs: [E1000RxDesc::default(); E1000_NUM_RX_DESC],
             tx_descs: [E1000TxDesc::default(); E1000_NUM_TX_DESC],
             rx_cur: 0,
@@ -247,16 +246,18 @@ impl<'a> E1000<'a> {
     fn read_mac(&mut self) -> bool {
         if self.eeprom_exists {
             let mut tmp: u16 = self.read_eeprom(0);
-            self.mac[0] = (tmp & 0xff) as u8;
-            self.mac[1] = (tmp >> 8) as u8;
+            let mut mac: [u8; 6] = [0; 6];
+            mac[0] = (tmp & 0xff) as u8;
+            mac[1] = (tmp >> 8) as u8;
 
             tmp = self.read_eeprom(1);
-            self.mac[2] = (tmp & 0xff) as u8;
-            self.mac[3] = (tmp >> 8) as u8;
+            mac[2] = (tmp & 0xff) as u8;
+            mac[3] = (tmp >> 8) as u8;
 
             tmp = self.read_eeprom(2);
-            self.mac[4] = (tmp & 0xff) as u8;
-            self.mac[5] = (tmp >> 8) as u8;
+            mac[4] = (tmp & 0xff) as u8;
+            mac[5] = (tmp >> 8) as u8;
+            self.mac = MacAddr { raw: mac };
             return true;
         }
 
@@ -274,24 +275,16 @@ impl<'a> E1000<'a> {
                         return false;
                     }
 
+                    let mut mac: [u8; 6] = [0; 6];
                     for i in 0..6 {
-                        self.mac[i] = *mem_base_mac8.add(i);
+                        mac[i] = *mem_base_mac8.add(i);
                     }
+                    self.mac = MacAddr { raw: mac };
                 }
 
                 return true;
             }
         }
-    }
-
-    fn print_mac(&mut self) {
-        for i in 0..6 {
-            if i != 0 {
-                print!(":");
-            }
-            print!("{:02X}", self.mac[i]);
-        }
-        println!();
     }
 
     pub fn clear_mta(&mut self) {
@@ -408,27 +401,26 @@ impl<'a> E1000<'a> {
     }
 }
 
-impl NetworkDriver for E1000<'_> {
+impl NetworkDriver for E1000 {
     fn start(&mut self) {
         self.detect_eeprom();
         if !self.read_mac() {
             return;
         }
 
-        self.print_mac();
         self.clear_mta();
 
-        let interrupt_line = self.device.interrupt_line;
+        let interrupt_line = self.device.lock().interrupt_line;
         IDT.lock()[usize::from(interrupt_line) + MIN_INTERRUPT].set_handler_fn(E1000::fire);
 
         self.enable_interrupts();
         self.rx_init();
         self.tx_init();
-        print!("E1000 started!");
+        println!("E1000 started!");
     }
 
-    fn get_mac_addr(&self) -> [u8; 6] {
-        self.mac
+    fn get_mac_addr(&self) -> &MacAddr {
+        &self.mac
     }
 
     fn send_packet(&mut self, data: &[u8]) -> Result<(), &'static str> {
@@ -442,8 +434,8 @@ impl NetworkDriver for E1000<'_> {
         let curr_idx = self.tx_cur as usize;
         self.tx_descs[curr_idx].addr = phys_addr.as_u64();
         self.tx_descs[curr_idx].length = data.len() as u16;
-        self.tx_descs[curr_idx].cmd = 0x0;
-        self.tx_descs[curr_idx].status = CMD_EOP | CMD_IFCS | CMD_RS;
+        self.tx_descs[curr_idx].cmd = CMD_EOP | CMD_IFCS | CMD_RS;
+        self.tx_descs[curr_idx].status = 0x0;
 
         let old_idx = curr_idx;
         self.tx_cur = (self.tx_cur + 1) % (E1000_NUM_TX_DESC as u16);

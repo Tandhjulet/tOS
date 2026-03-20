@@ -2,12 +2,12 @@ pub mod bar;
 
 use core::fmt;
 
-use alloc::vec::Vec;
+use alloc::{sync::Arc, vec::Vec};
 use lazy_static::lazy_static;
 use spin::Mutex;
 use x86_64::instructions::port::Port;
 
-use crate::{pci::bar::AnyBAR, print};
+use crate::pci::bar::AnyBAR;
 
 const CONFIG_ADDRESS: u16 = 0xCF8;
 const CONFIG_DATA: u16 = 0xCFC;
@@ -15,7 +15,7 @@ const CONFIG_DATA: u16 = 0xCFC;
 const BAR_OFFSETS: &[u8] = &[0x10, 0x14, 0x18, 0x1C, 0x20, 0x24];
 
 lazy_static! {
-    pub static ref DEVICES: Mutex<Vec<PciDevice>> = Mutex::new(check_all_buses());
+    pub static ref DEVICES: Mutex<Vec<Arc<Mutex<PciDevice>>>> = Mutex::new(check_all_buses());
 }
 
 // See https://wiki.osdev.org/PCI#Header_Type_0x0
@@ -93,21 +93,25 @@ impl PciDevice {
         return BAR_OFFSETS[bar];
     }
 
-    pub fn get_bar(&self, bar: u8) -> AnyBAR {
-        let bar_cnt = self.bar_count();
+    pub fn get_bar(device: &Arc<Mutex<Self>>, bar: u8) -> AnyBAR {
+        let bar_cnt = device.lock().bar_count();
 
         // invalid bar count
         if bar > bar_cnt - 1 {
             panic!(
                 "Invalid! BAR{} doesnt exist for type 0x{:04x}",
-                bar, self.header_type
+                bar,
+                device.lock().header_type
             );
         }
 
-        let offset = self.get_bar_offset(bar as usize);
-        let bar = self.read(offset);
+        let (offset, bar) = {
+            let lock = device.lock();
+            let offset = lock.get_bar_offset(bar as usize);
+            (offset, lock.read(offset))
+        };
 
-        AnyBAR::from_raw(bar, offset, self)
+        AnyBAR::from_raw(bar, offset, Arc::clone(device))
     }
 
     pub fn enable_bus_mastering(&mut self) {
@@ -134,8 +138,8 @@ impl fmt::Display for PciDevice {
     }
 }
 
-fn check_all_buses() -> Vec<PciDevice> {
-    let mut devices: Vec<PciDevice> = Vec::new();
+fn check_all_buses() -> Vec<Arc<Mutex<PciDevice>>> {
+    let mut devices: Vec<Arc<Mutex<PciDevice>>> = Vec::new();
     for bus in 0..=255 {
         for device in 0..32 {
             check_device(bus, device, &mut devices);
@@ -145,10 +149,10 @@ fn check_all_buses() -> Vec<PciDevice> {
     devices
 }
 
-fn check_device(bus: u8, device: u8, devices: &mut Vec<PciDevice>) {
+fn check_device(bus: u8, device: u8, devices: &mut Vec<Arc<Mutex<PciDevice>>>) {
     // https://wiki.osdev.org/PCI#Common_Header_Fields
     if let Some(dev) = check_function(bus, device, 0) {
-        devices.push(dev);
+        devices.push(Arc::new(Mutex::new(dev)));
     } else {
         return;
     }
@@ -157,7 +161,7 @@ fn check_device(bus: u8, device: u8, devices: &mut Vec<PciDevice>) {
     if (header & 0x80) != 0 {
         for function in 1..8 {
             if let Some(dev) = check_function(bus, device, function) {
-                devices.push(dev);
+                devices.push(Arc::new(Mutex::new(dev)));
             }
         }
     }
@@ -185,7 +189,6 @@ fn check_function(bus: u8, device: u8, function: u8) -> Option<PciDevice> {
 
     // Line 0xF always contains interrupt pin and interrupts line
     let line15 = pci_read(bus, device, function, HEADER0_LINE15_OFFSET);
-    print!("line15: 0x{:04x} ({}: {})", line15, class, subclass);
     let (_, _, interrupt_pin, interrupt_line) = unpack_quad(line15);
 
     Some(PciDevice {
