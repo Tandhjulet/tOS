@@ -41,10 +41,16 @@ pub struct MacAddr {
     raw: [u8; 6],
 }
 
-impl Default for MacAddr {
-    fn default() -> Self {
-        Self {
-            raw: Default::default(),
+impl MacAddr {
+    pub const fn broadcast() -> MacAddr {
+        MacAddr {
+            raw: [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF],
+        }
+    }
+
+    pub const fn zero() -> MacAddr {
+        MacAddr {
+            raw: [0x0, 0x0, 0x0, 0x0, 0x0, 0x0],
         }
     }
 }
@@ -94,7 +100,11 @@ impl<'a> EthernetFrame<'a> {
         }
     }
 
-    pub fn wire_len(&self) -> usize {
+    pub const fn header_len() -> usize {
+        ETHERNET_HEADER_SIZE
+    }
+
+    pub const fn wire_len(&self) -> usize {
         ETHERNET_HEADER_SIZE + self.payload.len()
     }
 

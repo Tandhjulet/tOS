@@ -195,7 +195,7 @@ impl E1000 {
             device,
             bar0,
             eeprom_exists: false,
-            mac: MacAddr::default(),
+            mac: MacAddr::zero(),
             rx_descs: [E1000RxDesc::default(); E1000_NUM_RX_DESC],
             tx_descs: [E1000TxDesc::default(); E1000_NUM_TX_DESC],
             rx_cur: 0,
