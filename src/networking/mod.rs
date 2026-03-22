@@ -6,7 +6,7 @@ use core::fmt::Display;
 use alloc::{boxed::Box, sync::Arc};
 use spin::Mutex;
 
-use crate::networking::drivers::E1000;
+use crate::networking::{drivers::E1000, protocols::arp::Arp};
 
 pub static NETWORK_DRIVER: Mutex<Option<Box<dyn NetworkDriver>>> = Mutex::new(None);
 

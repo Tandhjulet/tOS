@@ -1,8 +1,11 @@
 use core::net::Ipv4Addr;
 
-use crate::networking::{EtherType, EthernetFrame, MacAddr, NETWORK_DRIVER};
+use crate::{
+    networking::{EtherType, EthernetFrame, MacAddr, NETWORK_DRIVER},
+    print, println,
+};
 
-struct Arp {}
+pub struct Arp {}
 
 impl Arp {
     pub fn send() -> Result<(), &'static str> {
@@ -27,6 +30,7 @@ impl Arp {
         let len = frame.write_into(&mut frame_buf)?;
 
         driver.send_packet(&frame_buf[..len])?;
+        println!("sending {:?}", &frame_buf[..len]);
         Ok(())
     }
 }

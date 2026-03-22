@@ -444,7 +444,9 @@ impl NetworkDriver for E1000 {
                 .write_command(REG_TX_DESC_TAIL, self.tx_cur as u32)
         };
 
-        while self.tx_descs[old_idx].status & TSTA_DD == 0 {}
+        println!("waiting...");
+        while self.tx_descs[old_idx].status == 0 {}
+        println!("sent!");
         Ok(())
     }
 }
