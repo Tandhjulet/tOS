@@ -18,6 +18,9 @@ extern crate alloc;
 entry_point!(kernel_main);
 
 fn kernel_main(boot_info: &'static BootInfo) -> ! {
+    let physical_memory_offset = boot_info.physical_memory_offset;
+    println!("physical memory offset: {:#x}", physical_memory_offset);
+
     tOS::init();
     allocator::init(&boot_info).expect("heap initialization failed");
 

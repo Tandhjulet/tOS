@@ -6,7 +6,7 @@ use core::fmt::Display;
 use alloc::{boxed::Box, sync::Arc};
 use spin::Mutex;
 
-use crate::networking::{drivers::E1000, protocols::arp::Arp};
+use crate::{networking::drivers::E1000, print, println};
 
 pub static NETWORK_DRIVER: Mutex<Option<Box<dyn NetworkDriver>>> = Mutex::new(None);
 
@@ -27,12 +27,15 @@ pub fn init() {
     let mut driver = E1000::new(device);
     driver.start();
 
+    println!("driver is up?: {}", driver.is_up());
+
     *NETWORK_DRIVER.lock() = Some(Box::new(driver));
 }
 
 pub trait NetworkDriver: Send {
     fn start(&mut self);
     fn get_mac_addr(&self) -> &MacAddr;
+    fn is_up(&mut self) -> bool;
     fn send_packet(&mut self, data: &[u8]) -> Result<(), &'static str>;
 }
 

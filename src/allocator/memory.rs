@@ -28,6 +28,8 @@ pub struct BootInfoFrameAllocator {
     next: usize,
 }
 
+// TODO: rewrite to use a buddy allocator for
+// contiguity and deallocation
 impl BootInfoFrameAllocator {
     pub unsafe fn init(memory_map: &'static MemoryMap) -> Self {
         BootInfoFrameAllocator {
@@ -44,6 +46,11 @@ impl BootInfoFrameAllocator {
         let frame_addresses = addr_ranges.flat_map(|r| r.step_by(4096));
 
         frame_addresses.map(|addr| PhysFrame::containing_address(PhysAddr::new(addr)))
+    }
+
+    pub fn get_curr_frame(&self) -> Option<PhysFrame<Size4KiB>> {
+        let frame = self.usable_frames().nth(self.next);
+        frame
     }
 }
 

@@ -1,15 +1,46 @@
-use core::sync::atomic::AtomicU64;
+use core::{
+    alloc::{GlobalAlloc, Layout},
+    sync::atomic::AtomicU64,
+};
 
 use x86_64::{
     PhysAddr, VirtAddr,
-    structures::paging::{Mapper, Page, PageTableFlags, PhysFrame, Size4KiB, mapper::MapToError},
+    structures::paging::{
+        FrameAllocator, Mapper, Page, PageTableFlags, PhysFrame, Size4KiB, Translate,
+        mapper::MapToError,
+    },
 };
 
-use crate::allocator::{FRAME_ALLOCATOR, MAPPER};
+use crate::{
+    allocator::{ALLOCATOR, FRAME_ALLOCATOR, MAPPER},
+    print, println,
+};
 
-const PAGE_SIZE: u64 = 0x1000;
+static PAGE_SIZE: u64 = 0x1000;
+pub static NEXT_PHYS: AtomicU64 = AtomicU64::new(0x1000_0000);
+pub static NEXT_MMIO: AtomicU64 = AtomicU64::new(0xFFFF_8000_0000_0000);
 
-static NEXT_MMIO: AtomicU64 = AtomicU64::new(0xFFFF_8000_0000_0000);
+pub fn alloc_dma_region(size: u64) -> (VirtAddr, PhysAddr) {
+    let aligned_size = (size + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+    let pages = aligned_size / PAGE_SIZE;
+
+    // TODO: fix the BootInfoFrameAllocator to use a Buddy allocator
+    // so it's guaranteed the pages are contigous
+    let mut frame_guard = FRAME_ALLOCATOR.lock();
+    let frame_allocator = frame_guard.as_mut().unwrap();
+
+    let first_frame = frame_allocator.allocate_frame().expect("DMA alloc failed");
+    let phys = first_frame.start_address();
+
+    for _ in 1..pages {
+        frame_allocator.allocate_frame().expect("DMA alloc failed");
+    }
+
+    drop(frame_guard);
+
+    let virt = map_mmio(phys, aligned_size);
+    (virt, phys)
+}
 
 pub fn map_mmio(phys_addr: PhysAddr, size: u64) -> VirtAddr {
     let aligned_size = (size + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);

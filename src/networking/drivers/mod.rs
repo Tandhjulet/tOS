@@ -1,9 +1,12 @@
-use core::alloc::{GlobalAlloc, Layout};
+use core::{
+    alloc::{GlobalAlloc, Layout},
+    ptr::read_volatile,
+};
 
-use alloc::sync::Arc;
+use alloc::{borrow::ToOwned, boxed::Box, sync::Arc};
 use spin::Mutex;
 use x86_64::{
-    VirtAddr,
+    PhysAddr, VirtAddr,
     structures::{idt::InterruptStackFrame, paging::Translate},
 };
 
@@ -13,7 +16,10 @@ use x86_64::{
  * details regarding the implementation of the E1000 driver.
  */
 use crate::{
-    allocator::{self, ALLOCATOR, mmio},
+    allocator::{
+        self, ALLOCATOR, FRAME_ALLOCATOR,
+        mmio::{self, NEXT_PHYS, alloc_dma_region},
+    },
     helpers,
     interrupts::{IDT, MIN_INTERRUPT},
     networking::{MacAddr, NetworkDriver},
@@ -171,8 +177,8 @@ pub struct E1000 {
     bar0: AnyBAR,
     eeprom_exists: bool,
     mac: MacAddr,
-    rx_descs: [E1000RxDesc; E1000_NUM_RX_DESC],
-    tx_descs: [E1000TxDesc; E1000_NUM_TX_DESC],
+    rx_descs_addr: VirtAddr,
+    tx_descs_addr: VirtAddr,
     rx_cur: u16,
     tx_cur: u16,
 }
@@ -191,13 +197,15 @@ impl E1000 {
             bar.set_virt_addr(virt_addr);
         }
 
+        device.lock().enable_bus_mastering();
+
         Self {
             device,
             bar0,
             eeprom_exists: false,
             mac: MacAddr::zero(),
-            rx_descs: [E1000RxDesc::default(); E1000_NUM_RX_DESC],
-            tx_descs: [E1000TxDesc::default(); E1000_NUM_TX_DESC],
+            tx_descs_addr: VirtAddr::zero(),
+            rx_descs_addr: VirtAddr::zero(),
             rx_cur: 0,
             tx_cur: 0,
         }
@@ -306,36 +314,32 @@ impl E1000 {
     }
 
     pub fn rx_init(&mut self) {
-        let guard = allocator::MAPPER.lock();
-        let mapper = guard.as_ref().unwrap();
+        const BLOCK_SIZE: usize = size_of::<E1000RxDesc>() * E1000_NUM_RX_DESC;
+        const TOTAL_SIZE: u64 = (BLOCK_SIZE + RX_BUFFER_SIZE * E1000_NUM_RX_DESC) as u64;
 
-        let raw_rx_addr = self.rx_descs.as_ptr() as u64;
-        let phys_rx_addr = mapper.translate_addr(VirtAddr::new(raw_rx_addr)).unwrap();
-        let raw_phys_rx = phys_rx_addr.as_u64();
+        let (rx_virt, rx_phys) = alloc_dma_region(TOTAL_SIZE);
 
-        let buf_layout = Layout::from_size_align(RX_BUFFER_SIZE, 16).unwrap();
+        let descs = rx_virt.as_mut_ptr::<E1000RxDesc>();
+        let buffers_phys = rx_phys.as_u64() + BLOCK_SIZE as u64;
+
         for i in 0..E1000_NUM_RX_DESC {
-            let buf_ptr: *mut u8 = unsafe { ALLOCATOR.alloc(buf_layout) };
-            assert!(!buf_ptr.is_null(), "Failed to allocate RX buffer");
-
-            let buf_phys = mapper
-                .translate_addr(VirtAddr::new(buf_ptr as u64))
-                .unwrap();
-
-            let desc = &mut self.rx_descs[i];
-            desc.addr = buf_phys.as_u64();
-            desc.status = 0;
+            let buf_phys = buffers_phys + (i * RX_BUFFER_SIZE) as u64;
+            unsafe {
+                let desc = &mut *descs.add(i);
+                desc.addr = buf_phys;
+                desc.status = 0;
+            }
         }
+
+        self.rx_descs_addr = rx_virt;
 
         unsafe {
             self.bar0
-                .write_command(REG_RX_DESC_LO, (raw_phys_rx & 0xFFFF_FFFF) as u32);
+                .write_command(REG_RX_DESC_LO, (rx_phys.as_u64() & 0xFFFF_FFFF) as u32);
             self.bar0
-                .write_command(REG_RX_DESC_HI, (raw_phys_rx >> 32) as u32);
-
-            let rx_desc_size = size_of::<E1000RxDesc>();
+                .write_command(REG_RX_DESC_HI, (rx_phys.as_u64() >> 32) as u32);
             self.bar0
-                .write_command(REG_RX_DESC_LEN, (E1000_NUM_RX_DESC * rx_desc_size) as u32);
+                .write_command(REG_RX_DESC_LEN, (BLOCK_SIZE) as u32);
 
             self.bar0.write_command(REG_RX_DESC_HEAD, 0);
             self.bar0
@@ -357,24 +361,26 @@ impl E1000 {
     }
 
     pub fn tx_init(&mut self) {
-        let guard = allocator::MAPPER.lock();
-        let mapper = guard.as_ref().unwrap();
+        let (tx_virt, tx_phys) =
+            alloc_dma_region((size_of::<E1000TxDesc>() * E1000_NUM_TX_DESC) as u64);
 
-        let raw_tx_addr = self.tx_descs.as_ptr() as u64;
-        let phys_tx_addr = mapper.translate_addr(VirtAddr::new(raw_tx_addr)).unwrap();
-        let raw_phys_tx = phys_tx_addr.as_u64();
-
+        let tx_descs = tx_virt.as_mut_ptr::<E1000TxDesc>();
         for i in 0..E1000_NUM_TX_DESC {
-            self.tx_descs[i].addr = 0;
-            self.tx_descs[i].cmd = 0;
-            self.tx_descs[i].status = TSTA_DD;
+            unsafe {
+                let desc = tx_descs.add(i);
+                (*desc).addr = 0;
+                (*desc).cmd = 0;
+                (*desc).status = TSTA_DD;
+            }
         }
+
+        self.tx_descs_addr = tx_virt;
 
         unsafe {
             self.bar0
-                .write_command(REG_TX_DESC_LO, (raw_phys_tx & 0xFFFFFFFF) as u32);
+                .write_command(REG_TX_DESC_LO, (tx_phys.as_u64() & 0xFFFFFFFF) as u32);
             self.bar0
-                .write_command(REG_TX_DESC_HI, (raw_phys_tx >> 32) as u32);
+                .write_command(REG_TX_DESC_HI, (tx_phys.as_u64() >> 32) as u32);
 
             let tx_desc_size = size_of::<E1000TxDesc>();
             self.bar0
@@ -414,6 +420,7 @@ impl NetworkDriver for E1000 {
         IDT.lock()[usize::from(interrupt_line) + MIN_INTERRUPT].set_handler_fn(E1000::fire);
 
         self.enable_interrupts();
+
         self.rx_init();
         self.tx_init();
         println!("E1000 started!");
@@ -424,29 +431,39 @@ impl NetworkDriver for E1000 {
     }
 
     fn send_packet(&mut self, data: &[u8]) -> Result<(), &'static str> {
-        let guard = allocator::MAPPER.lock();
-        let mapper = guard.as_ref().unwrap();
-
-        let phys_addr = mapper
-            .translate_addr(VirtAddr::new(data.as_ptr() as u64))
-            .ok_or("failed to translate TX buffer addr")?;
+        // TODO: don't realloc to ensure DMA
+        let (tx_buf_virt, tx_buf_phys) = alloc_dma_region(data.len() as u64);
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                data.as_ptr(),
+                tx_buf_virt.as_mut_ptr::<u8>(),
+                data.len(),
+            );
+        }
 
         let curr_idx = self.tx_cur as usize;
-        self.tx_descs[curr_idx].addr = phys_addr.as_u64();
-        self.tx_descs[curr_idx].length = data.len() as u16;
-        self.tx_descs[curr_idx].cmd = CMD_EOP | CMD_IFCS | CMD_RS;
-        self.tx_descs[curr_idx].status = 0x0;
+        let desc = unsafe { &mut *self.tx_descs_addr.as_mut_ptr::<E1000TxDesc>().add(curr_idx) };
 
-        let old_idx = curr_idx;
+        desc.addr = tx_buf_phys.as_u64();
+        desc.length = data.len() as u16;
+        desc.cmd = CMD_EOP | CMD_IFCS | CMD_RS;
+        desc.status = 0x0;
+
         self.tx_cur = (self.tx_cur + 1) % (E1000_NUM_TX_DESC as u16);
+
         unsafe {
             self.bar0
                 .write_command(REG_TX_DESC_TAIL, self.tx_cur as u32)
         };
 
-        println!("waiting...");
-        while self.tx_descs[old_idx].status == 0 {}
-        println!("sent!");
+        while unsafe { read_volatile(&desc.status) } == 0 {
+            core::hint::spin_loop();
+        }
         Ok(())
+    }
+
+    fn is_up(&mut self) -> bool {
+        let status = unsafe { self.bar0.read_command(REG_STATUS) };
+        status & 0x2 != 0
     }
 }
