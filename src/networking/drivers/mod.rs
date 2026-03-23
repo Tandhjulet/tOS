@@ -7,6 +7,7 @@ use alloc::{borrow::ToOwned, boxed::Box, sync::Arc};
 use spin::Mutex;
 use x86_64::{
     PhysAddr, VirtAddr,
+    instructions::interrupts::without_interrupts,
     structures::{idt::InterruptStackFrame, paging::Translate},
 };
 
@@ -21,7 +22,7 @@ use crate::{
         mmio::{self, NEXT_PHYS, alloc_dma_region},
     },
     helpers,
-    interrupts::{IDT, MIN_INTERRUPT},
+    interrupts::{IDT, MIN_INTERRUPT, PICS},
     networking::{MacAddr, NetworkDriver},
     pci::{
         PciDevice,
@@ -418,6 +419,18 @@ impl NetworkDriver for E1000 {
 
         let interrupt_line = self.device.lock().interrupt_line;
         IDT.lock()[usize::from(interrupt_line) + MIN_INTERRUPT].set_handler_fn(E1000::fire);
+
+        without_interrupts(|| {
+            let mut pics = PICS.lock();
+            unsafe {
+                let [master, slave] = pics.read_masks();
+                if interrupt_line < 8 {
+                    pics.write_masks(master & !(1u8 << interrupt_line), slave);
+                } else {
+                    pics.write_masks(master, slave & !(1u8 << (interrupt_line - 8)));
+                }
+            };
+        });
 
         self.enable_interrupts();
 

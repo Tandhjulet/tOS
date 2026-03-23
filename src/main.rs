@@ -7,7 +7,7 @@
 use bootloader::{BootInfo, entry_point};
 use core::panic::PanicInfo;
 use tOS::{
-    allocator,
+    allocator, interrupts,
     networking::{self, protocols::arp::Arp},
     println,
     task::{Task, executor::Executor, keyboard},
@@ -25,6 +25,9 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     allocator::init(&boot_info).expect("heap initialization failed");
 
     networking::init();
+
+    interrupts::load_idt();
+
     Arp::send().unwrap();
 
     let mut executor = Executor::new();

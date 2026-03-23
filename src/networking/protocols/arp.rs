@@ -68,7 +68,7 @@ impl ArpMessage {
 
     pub fn write_to(&self, buf: &mut [u8]) -> usize {
         buf[0..2].copy_from_slice(&HardwareType::Ethernet.to_bytes()); // HW Type
-        buf[2..4].copy_from_slice(&ProtocolType::ARP.to_bytes()); // Protocol type
+        buf[2..4].copy_from_slice(&ProtocolType::IPv4.to_bytes()); // Protocol type
         buf[4] = 6; // HW length
         buf[5] = 4; // Protocol length
         buf[6..8].copy_from_slice(&self.operation.to_bytes());
@@ -111,7 +111,7 @@ impl HardwareType {
 #[derive(Debug, Clone, Copy)]
 #[repr(u16)]
 pub enum ProtocolType {
-    ARP = 0x0800,
+    IPv4 = 0x0800,
 }
 
 impl ProtocolType {

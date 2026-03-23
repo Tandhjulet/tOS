@@ -46,6 +46,13 @@ pub fn init_idt() {
     idt[InterruptIndex::Timer.as_usize()].set_handler_fn(timer_interrupt_handler);
     idt[InterruptIndex::Keyboard.as_usize()].set_handler_fn(keyboard_interrupt_handler);
 
+    // clear lock and load
+    drop(idt);
+    load_idt();
+}
+
+pub fn load_idt() {
+    let idt = IDT.lock();
     let idt_static: &'static InterruptDescriptorTable = unsafe { &*(&*idt as *const _) };
     idt_static.load();
 }
