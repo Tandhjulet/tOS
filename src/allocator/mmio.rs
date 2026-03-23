@@ -1,20 +1,13 @@
-use core::{
-    alloc::{GlobalAlloc, Layout},
-    sync::atomic::AtomicU64,
-};
+use core::sync::atomic::AtomicU64;
 
 use x86_64::{
     PhysAddr, VirtAddr,
     structures::paging::{
-        FrameAllocator, Mapper, Page, PageTableFlags, PhysFrame, Size4KiB, Translate,
-        mapper::MapToError,
+        FrameAllocator, Mapper, Page, PageTableFlags, PhysFrame, Size4KiB, mapper::MapToError,
     },
 };
 
-use crate::{
-    allocator::{ALLOCATOR, FRAME_ALLOCATOR, MAPPER},
-    print, println,
-};
+use crate::allocator::{FRAME_ALLOCATOR, MAPPER};
 
 static PAGE_SIZE: u64 = 0x1000;
 pub static NEXT_PHYS: AtomicU64 = AtomicU64::new(0x1000_0000);

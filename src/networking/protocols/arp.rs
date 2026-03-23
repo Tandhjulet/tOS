@@ -2,7 +2,7 @@ use core::net::Ipv4Addr;
 
 use crate::{
     networking::{EtherType, EthernetFrame, MacAddr, NETWORK_DRIVER},
-    print, println,
+    println,
 };
 
 pub struct Arp {}

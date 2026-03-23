@@ -1,14 +1,9 @@
-use core::{
-    alloc::{GlobalAlloc, Layout},
-    ptr::read_volatile,
-};
+use core::ptr::read_volatile;
 
-use alloc::{borrow::ToOwned, boxed::Box, sync::Arc};
+use alloc::sync::Arc;
 use spin::Mutex;
 use x86_64::{
-    PhysAddr, VirtAddr,
-    instructions::interrupts::without_interrupts,
-    structures::{idt::InterruptStackFrame, paging::Translate},
+    VirtAddr, instructions::interrupts::without_interrupts, structures::idt::InterruptStackFrame,
 };
 
 /**
@@ -17,10 +12,7 @@ use x86_64::{
  * details regarding the implementation of the E1000 driver.
  */
 use crate::{
-    allocator::{
-        self, ALLOCATOR, FRAME_ALLOCATOR,
-        mmio::{self, NEXT_PHYS, alloc_dma_region},
-    },
+    allocator::mmio::{self, alloc_dma_region},
     helpers,
     interrupts::{IDT, MIN_INTERRUPT, PICS},
     networking::{MacAddr, NetworkDriver},
@@ -444,7 +436,7 @@ impl NetworkDriver for E1000 {
     }
 
     fn send_packet(&mut self, data: &[u8]) -> Result<(), &'static str> {
-        // TODO: don't realloc to ensure DMA
+        // TODO: don't realloc to ensure DMA - use pre-alloc buffers for performance
         let (tx_buf_virt, tx_buf_phys) = alloc_dma_region(data.len() as u64);
         unsafe {
             core::ptr::copy_nonoverlapping(
