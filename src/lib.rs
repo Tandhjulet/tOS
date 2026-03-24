@@ -21,10 +21,10 @@ extern crate alloc;
 
 pub fn init() {
     gdt::init();
+
     interrupts::init_idt();
-    unsafe {
-        interrupts::PICS.lock().initialize();
-    };
+    interrupts::init_pics();
+
     x86_64::instructions::interrupts::enable();
 }
 

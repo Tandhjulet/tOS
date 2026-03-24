@@ -32,6 +32,15 @@ impl InterruptIndex {
 // and then generate 256 functions as unique handlers for each IRQ number using a macro
 pub static IDT: Mutex<InterruptDescriptorTable> = Mutex::new(InterruptDescriptorTable::new());
 
+pub fn init_pics() {
+    unsafe {
+        PICS.lock().initialize();
+
+        let [master, slave] = PICS.lock().read_masks();
+        PICS.lock().write_masks(master & !(1u8 << 2), slave);
+    }
+}
+
 pub fn init_idt() {
     let mut idt = IDT.lock();
     idt.breakpoint.set_handler_fn(breakpoint_handler);

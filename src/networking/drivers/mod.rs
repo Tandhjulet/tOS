@@ -15,7 +15,7 @@ use crate::{
     allocator::mmio::{self, alloc_dma_region},
     helpers,
     interrupts::{IDT, MIN_INTERRUPT, PICS},
-    networking::{MacAddr, NetworkDriver},
+    networking::{MacAddr, NETWORK_DRIVER, NetworkDriver},
     pci::{
         PciDevice,
         bar::{AnyBAR, BAR},
@@ -107,6 +107,7 @@ const CMD_RS: u8 = 1 << 3;
 
 // INTERRUPTS
 const REG_I_MASK: u16 = 0x00D0; // Interrupt Mask Set/Read
+const REG_I_MASK_CLEAR: u16 = 0x00D8;
 const REG_I_READ: u16 = 0xC0;
 
 // MISC
@@ -166,6 +167,7 @@ impl Default for E1000RxDesc {
 }
 
 pub struct E1000 {
+    interrupt_line: u8,
     device: Arc<Mutex<PciDevice>>,
     bar0: AnyBAR,
     eeprom_exists: bool,
@@ -177,8 +179,8 @@ pub struct E1000 {
 }
 
 impl E1000 {
-    pub fn new(device: Arc<Mutex<PciDevice>>) -> Self {
-        let mut bar0 = PciDevice::get_bar(&device, 0);
+    pub fn new(guard: Arc<Mutex<PciDevice>>) -> Self {
+        let mut bar0 = PciDevice::get_bar(&guard, 0);
         if let AnyBAR::Mem(ref mut bar) = bar0 {
             let virt_addr = {
                 let phys_addr = bar.addr();
@@ -190,10 +192,14 @@ impl E1000 {
             bar.set_virt_addr(virt_addr);
         }
 
-        device.lock().enable_bus_mastering();
+        let irq = {
+            let mut device = guard.lock();
+            device.enable_bus_mastering();
+            device.interrupt_line
+        };
 
         Self {
-            device,
+            device: guard,
             bar0,
             eeprom_exists: false,
             mac: MacAddr::zero(),
@@ -201,6 +207,7 @@ impl E1000 {
             rx_descs_addr: VirtAddr::zero(),
             rx_cur: 0,
             tx_cur: 0,
+            interrupt_line: irq,
         }
     }
 
@@ -298,11 +305,14 @@ impl E1000 {
 
     pub fn enable_interrupts(&mut self) {
         unsafe {
-            self.bar0.write_command(REG_I_MASK, 0x1F6DC);
-            self.bar0.write_command(REG_I_MASK, 0xFF & !4);
-
             // read to clear all reg bits
             self.bar0.read_command(REG_I_READ);
+
+            self.bar0.write_command(REG_I_MASK_CLEAR, 0xFFFFFFFF);
+            let imask = 0x80  // RXT0 - receive timer
+                  | 0x10  // RXO  - receive overrun
+                  | 0x04; // LSC  - link status change
+            self.bar0.write_command(REG_I_MASK, imask);
         }
     }
 
@@ -395,8 +405,8 @@ impl E1000 {
         };
     }
 
-    extern "x86-interrupt" fn fire(stack_frame: InterruptStackFrame) {
-        todo!()
+    extern "x86-interrupt" fn test(stact_frame: InterruptStackFrame) {
+        panic!("test!");
     }
 }
 
@@ -409,25 +419,26 @@ impl NetworkDriver for E1000 {
 
         self.clear_mta();
 
-        let interrupt_line = self.device.lock().interrupt_line;
-        IDT.lock()[usize::from(interrupt_line) + MIN_INTERRUPT].set_handler_fn(E1000::fire);
+        self.rx_init();
+        self.tx_init();
 
         without_interrupts(|| {
+            IDT.lock()[(self.interrupt_line as usize) + MIN_INTERRUPT]
+                .set_handler_fn(<dyn NetworkDriver>::fire);
+
             let mut pics = PICS.lock();
             unsafe {
                 let [master, slave] = pics.read_masks();
-                if interrupt_line < 8 {
-                    pics.write_masks(master & !(1u8 << interrupt_line), slave);
+                if self.interrupt_line < 8 {
+                    pics.write_masks(master & !(1u8 << self.interrupt_line), slave);
                 } else {
-                    pics.write_masks(master, slave & !(1u8 << (interrupt_line - 8)));
+                    pics.write_masks(master, slave & !(1u8 << (self.interrupt_line - 8)));
                 }
             };
         });
 
         self.enable_interrupts();
 
-        self.rx_init();
-        self.tx_init();
         println!("E1000 started!");
     }
 
@@ -470,5 +481,13 @@ impl NetworkDriver for E1000 {
     fn is_up(&mut self) -> bool {
         let status = unsafe { self.bar0.read_command(REG_STATUS) };
         status & 0x2 != 0
+    }
+
+    fn handle_interrupt(&mut self, stack_frame: InterruptStackFrame) {
+        todo!()
+    }
+
+    fn get_interrupt_line(&self) -> u8 {
+        self.interrupt_line
     }
 }

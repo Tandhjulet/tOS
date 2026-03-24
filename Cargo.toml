@@ -56,7 +56,7 @@ test-args = [
 ]
 run-args = [
 	"-netdev",
-	"user,id=net0",
+	"tap,id=net0,ifname=tap0,script=no,downscript=no",
 	"-device",
 	"e1000,netdev=net0",
 	"-serial",

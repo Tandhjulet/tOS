@@ -5,31 +5,37 @@ use core::fmt::Display;
 
 use alloc::{boxed::Box, sync::Arc};
 use spin::Mutex;
+use x86_64::structures::idt::InterruptStackFrame;
 
-use crate::{networking::drivers::E1000, print, println};
+use crate::{interrupts::PICS, networking::drivers::E1000, println};
 
 pub static NETWORK_DRIVER: Mutex<Option<Box<dyn NetworkDriver>>> = Mutex::new(None);
 
 pub fn init() {
-    let mut devices = crate::pci::DEVICES.lock();
+    let mut lock = {
+        let mut devices = crate::pci::DEVICES.lock();
 
-    // https://wiki.osdev.org/PCI#Class_Codes
-    let device = devices.iter_mut().find(|d| {
-        let d = d.lock();
-        d.class == 0x2 && d.subclass == 0x0
-    });
+        // https://wiki.osdev.org/PCI#Class_Codes
+        let device = devices.iter_mut().find(|d| {
+            let d = d.lock();
+            d.class == 0x2 && d.subclass == 0x0
+        });
 
-    let Some(device) = device else { return };
+        let Some(device) = device else { return };
 
-    let device = Arc::clone(device);
-    drop(devices); // release the DEVICES lock before locking the individual device to avoid potential deadlocks
+        let device: Arc<Mutex<crate::pci::PciDevice>> = Arc::clone(device);
+        drop(devices); // release the DEVICES lock before locking the individual device to avoid potential deadlocks
 
-    let mut driver = E1000::new(device);
+        let driver = E1000::new(device);
+        *NETWORK_DRIVER.lock() = Some(Box::new(driver));
+
+        NETWORK_DRIVER.lock()
+    };
+
+    let driver = lock.as_mut().unwrap();
     driver.start();
 
     println!("driver is up?: {}", driver.is_up());
-
-    *NETWORK_DRIVER.lock() = Some(Box::new(driver));
 }
 
 pub trait NetworkDriver: Send {
@@ -37,6 +43,24 @@ pub trait NetworkDriver: Send {
     fn get_mac_addr(&self) -> &MacAddr;
     fn is_up(&mut self) -> bool;
     fn send_packet(&mut self, data: &[u8]) -> Result<(), &'static str>;
+    fn handle_interrupt(&mut self, stack_frame: InterruptStackFrame);
+    fn get_interrupt_line(&self) -> u8;
+}
+
+impl dyn NetworkDriver {
+    extern "x86-interrupt" fn fire(stack_frame: InterruptStackFrame) {
+        let irq_line = {
+            let mut driver = NETWORK_DRIVER.lock();
+            let driver = driver.as_mut().unwrap();
+
+            driver.handle_interrupt(stack_frame);
+            driver.get_interrupt_line()
+        };
+
+        unsafe {
+            PICS.lock().notify_end_of_interrupt(irq_line);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

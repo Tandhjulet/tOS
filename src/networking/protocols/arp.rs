@@ -29,8 +29,9 @@ impl Arp {
         let mut frame_buf = [0u8; FRAME_LEN + ARP_LEN];
         let len = frame.write_into(&mut frame_buf)?;
 
+        println!("sending...");
         driver.send_packet(&frame_buf[..len])?;
-        println!("sending {:?}", &frame_buf[..len]);
+        println!("sent {:?}", &frame_buf[..len]);
         Ok(())
     }
 }
@@ -50,8 +51,8 @@ impl ArpMessage {
         const DST_HW_ADDR: MacAddr = MacAddr::zero();
         const DST_PC_ADDR: Ipv4Addr = Ipv4Addr::new(10, 2, 2, 1);
 
-        // hardcode IP 10.2.2.3 until we get one
-        const SRC_IP: Ipv4Addr = Ipv4Addr::new(10, 2, 2, 3);
+        // hardcode IP until we get one
+        const SRC_IP: Ipv4Addr = Ipv4Addr::new(192, 168, 100, 1);
 
         Self {
             operation: Operation::ArpRequest,
