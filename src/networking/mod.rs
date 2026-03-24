@@ -3,7 +3,7 @@ pub mod protocols;
 
 use core::fmt::Display;
 
-use alloc::{boxed::Box, sync::Arc};
+use alloc::{boxed::Box, sync::Arc, vec};
 use spin::Mutex;
 use x86_64::structures::idt::InterruptStackFrame;
 
@@ -42,7 +42,7 @@ pub trait NetworkDriver: Send {
     fn start(&mut self);
     fn get_mac_addr(&self) -> &MacAddr;
     fn is_up(&mut self) -> bool;
-    fn send_packet(&mut self, data: &[u8]) -> Result<(), &'static str>;
+    fn send_raw_data(&mut self, data: &[u8]) -> Result<(), &'static str>;
     fn handle_interrupt(&mut self, stack_frame: InterruptStackFrame);
     fn get_interrupt_line(&self) -> u8;
 }
@@ -60,6 +60,28 @@ impl dyn NetworkDriver {
         unsafe {
             PICS.lock().notify_end_of_interrupt(irq_line);
         }
+    }
+
+    // FIXME: this requires a lock to run which is inefficient and unnecessary.
+    pub fn send_packet(
+        &mut self,
+        dst_mac: MacAddr,
+        ethertype: EtherType,
+        payload: &[u8],
+    ) -> Result<(), &'static str> {
+        let frame = EthernetFrame {
+            dst_mac,
+            src_mac: *self.get_mac_addr(),
+            ethertype,
+            payload,
+        };
+
+        const FRAME_LEN: usize = EthernetFrame::header_len();
+        let mut frame_buf = vec![0; FRAME_LEN + payload.len()];
+        let len = frame.write_into(&mut frame_buf)?;
+
+        &self.send_raw_data(&frame_buf[..len])?;
+        Ok(())
     }
 }
 

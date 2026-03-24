@@ -1,9 +1,6 @@
 use core::net::Ipv4Addr;
 
-use crate::{
-    networking::{EtherType, EthernetFrame, MacAddr, NETWORK_DRIVER},
-    println,
-};
+use crate::networking::{EtherType, MacAddr, NETWORK_DRIVER};
 
 pub struct Arp {}
 
@@ -18,20 +15,7 @@ impl Arp {
         let arp = ArpMessage::new(*mac);
         let arp_len = arp.write_to(&mut arp_buf);
 
-        let frame = EthernetFrame {
-            dst_mac: MacAddr::broadcast(),
-            src_mac: *mac,
-            ethertype: EtherType::ARP,
-            payload: &arp_buf[..arp_len],
-        };
-
-        const FRAME_LEN: usize = EthernetFrame::header_len();
-        let mut frame_buf = [0u8; FRAME_LEN + ARP_LEN];
-        let len = frame.write_into(&mut frame_buf)?;
-
-        println!("sending...");
-        driver.send_packet(&frame_buf[..len])?;
-        println!("sent {:?}", &frame_buf[..len]);
+        driver.send_packet(MacAddr::broadcast(), EtherType::ARP, &arp_buf[..arp_len])?;
         Ok(())
     }
 }
@@ -69,7 +53,7 @@ impl ArpMessage {
 
     pub fn write_to(&self, buf: &mut [u8]) -> usize {
         buf[0..2].copy_from_slice(&HardwareType::Ethernet.to_bytes()); // HW Type
-        buf[2..4].copy_from_slice(&ProtocolType::IPv4.to_bytes()); // Protocol type
+        buf[2..4].copy_from_slice(&ARPProtocolType::IPv4.to_bytes()); // Protocol type
         buf[4] = 6; // HW length
         buf[5] = 4; // Protocol length
         buf[6..8].copy_from_slice(&self.operation.to_bytes());
@@ -111,11 +95,11 @@ impl HardwareType {
 
 #[derive(Debug, Clone, Copy)]
 #[repr(u16)]
-pub enum ProtocolType {
+pub enum ARPProtocolType {
     IPv4 = 0x0800,
 }
 
-impl ProtocolType {
+impl ARPProtocolType {
     pub fn to_bytes(&self) -> [u8; 2] {
         (*self as u16).to_be_bytes()
     }

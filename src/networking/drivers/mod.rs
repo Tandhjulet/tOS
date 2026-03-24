@@ -446,7 +446,7 @@ impl NetworkDriver for E1000 {
         &self.mac
     }
 
-    fn send_packet(&mut self, data: &[u8]) -> Result<(), &'static str> {
+    fn send_raw_data(&mut self, data: &[u8]) -> Result<(), &'static str> {
         // TODO: don't realloc to ensure DMA - use pre-alloc buffers for performance
         let (tx_buf_virt, tx_buf_phys) = alloc_dma_region(data.len() as u64);
         unsafe {
