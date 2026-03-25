@@ -3,7 +3,8 @@ use core::ptr::read_volatile;
 use alloc::sync::Arc;
 use spin::Mutex;
 use x86_64::{
-    VirtAddr, instructions::interrupts::without_interrupts, structures::idt::InterruptStackFrame,
+    PhysAddr, VirtAddr, instructions::interrupts::without_interrupts,
+    structures::idt::InterruptStackFrame,
 };
 
 /**
@@ -109,6 +110,10 @@ const CMD_RS: u8 = 1 << 3;
 const REG_I_MASK: u16 = 0x00D0; // Interrupt Mask Set/Read
 const REG_I_MASK_CLEAR: u16 = 0x00D8;
 const REG_I_READ: u16 = 0xC0;
+
+const I_RXT0: u32 = 0x80; // Receive timer
+const I_RX0: u32 = 0x10; // Receive overrun
+const I_LSC: u32 = 0x04; // Link Status Change
 
 // MISC
 const MTA_LENGTH: usize = 128;
@@ -309,11 +314,16 @@ impl E1000 {
             self.bar0.read_command(REG_I_READ);
 
             self.bar0.write_command(REG_I_MASK_CLEAR, 0xFFFFFFFF);
-            let imask = 0x80  // RXT0 - receive timer
-                  | 0x10  // RXO  - receive overrun
-                  | 0x04; // LSC  - link status change
+            let imask = I_RX0 | I_LSC | I_RXT0;
             self.bar0.write_command(REG_I_MASK, imask);
         }
+    }
+
+    fn get_desc_buffer_ptr(&self, buffer_idx: usize) -> *const u8 {
+        let descs_addr = self.rx_descs_addr.as_u64();
+        let buffers_start_addr = descs_addr + (size_of::<E1000RxDesc>() * E1000_NUM_RX_DESC) as u64;
+
+        (buffers_start_addr + (buffer_idx * RX_BUFFER_SIZE) as u64) as *const _
     }
 
     pub fn rx_init(&mut self) {
@@ -405,8 +415,31 @@ impl E1000 {
         };
     }
 
-    extern "x86-interrupt" fn test(stact_frame: InterruptStackFrame) {
-        panic!("test!");
+    fn handle_receive(&mut self) {
+        loop {
+            let curr_idx = self.rx_cur as usize;
+            let desc =
+                unsafe { &mut *self.rx_descs_addr.as_mut_ptr::<E1000RxDesc>().add(curr_idx) };
+
+            if unsafe { read_volatile(&desc.status) } & TSTA_DD == 0 {
+                break;
+            }
+
+            let len = desc.length;
+            let packet = unsafe {
+                core::slice::from_raw_parts(self.get_desc_buffer_ptr(curr_idx), len as usize)
+            };
+
+            println!("Received packet: {:?}", packet);
+
+            desc.status = 0;
+            self.rx_cur = (self.rx_cur + 1) % (E1000_NUM_RX_DESC as u16);
+
+            unsafe {
+                self.bar0
+                    .write_command(REG_RX_DESC_TAIL, self.rx_cur as u32)
+            };
+        }
     }
 }
 
@@ -484,7 +517,12 @@ impl NetworkDriver for E1000 {
     }
 
     fn handle_interrupt(&mut self, stack_frame: InterruptStackFrame) {
-        todo!()
+        unsafe { self.bar0.write_command(REG_I_MASK, 0x1) };
+
+        let status = unsafe { self.bar0.read_command(REG_I_READ) };
+        if status & I_RXT0 > 0 {
+            self.handle_receive();
+        }
     }
 
     fn get_interrupt_line(&self) -> u8 {

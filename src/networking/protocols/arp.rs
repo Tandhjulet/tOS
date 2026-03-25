@@ -1,22 +1,40 @@
 use core::net::Ipv4Addr;
 
+use alloc::collections::btree_map::BTreeMap;
+use spin::Mutex;
+
 use crate::networking::{EtherType, MacAddr, NETWORK_DRIVER};
+
+static ARP_CACHE: Mutex<BTreeMap<Ipv4Addr, MacAddr>> = Mutex::new(BTreeMap::new());
 
 pub struct Arp {}
 
 impl Arp {
-    pub fn send() -> Result<(), &'static str> {
+    pub fn discover(ip: &Ipv4Addr) -> Result<(), &'static str> {
         let mut lock = NETWORK_DRIVER.lock();
         let driver = lock.as_mut().unwrap();
         let mac = driver.get_mac_addr();
 
         const ARP_LEN: usize = ArpMessage::len();
         let mut arp_buf = [0u8; ARP_LEN];
-        let arp = ArpMessage::new(*mac);
+        let arp = ArpMessage::new(*mac, *ip);
         let arp_len = arp.write_to(&mut arp_buf);
 
+        // FIXME: make some sort of async waker such this can return when response is gotten
         driver.send_packet(MacAddr::broadcast(), EtherType::ARP, &arp_buf[..arp_len])?;
         Ok(())
+    }
+
+    pub fn lookup(ip: &Ipv4Addr) -> Option<MacAddr> {
+        let lock = ARP_CACHE.lock();
+        let cache_res = lock.get(ip);
+        if let Some(mac) = cache_res {
+            return Some(*mac);
+        }
+        drop(lock);
+
+        Arp::discover(ip).unwrap();
+        None
     }
 }
 
@@ -31,9 +49,8 @@ pub struct ArpMessage {
 }
 
 impl ArpMessage {
-    pub fn new(src_mac: MacAddr) -> Self {
+    pub fn new(src_mac: MacAddr, to_discover: Ipv4Addr) -> Self {
         const DST_HW_ADDR: MacAddr = MacAddr::zero();
-        const DST_PC_ADDR: Ipv4Addr = Ipv4Addr::new(10, 2, 2, 1);
 
         // hardcode IP until we get one
         const SRC_IP: Ipv4Addr = Ipv4Addr::new(192, 168, 100, 1);
@@ -43,7 +60,7 @@ impl ArpMessage {
             src_hw_addr: src_mac,
             src_pc_addr: SRC_IP,
             dst_hw_addr: DST_HW_ADDR,
-            dst_pc_addr: DST_PC_ADDR,
+            dst_pc_addr: to_discover,
         }
     }
 

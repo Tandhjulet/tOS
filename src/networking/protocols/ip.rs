@@ -4,7 +4,7 @@ use alloc::vec::Vec;
 
 use crate::networking::{EtherType, MacAddr, NETWORK_DRIVER};
 
-struct IP {
+pub struct IP {
     _private: (),
 }
 
@@ -21,8 +21,8 @@ impl IP {
         let mut lock = NETWORK_DRIVER.lock();
         let driver = lock.as_mut().unwrap();
 
-        // TODO: get mac
-        driver.send_packet(MacAddr::zero(), EtherType::ARP, data)?;
+        // TODO: get mac with arp
+        driver.send_packet(MacAddr::zero(), EtherType::IPv4, data)?;
         Ok(())
     }
 }

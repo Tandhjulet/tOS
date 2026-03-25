@@ -69,6 +69,12 @@ impl dyn NetworkDriver {
         ethertype: EtherType,
         payload: &[u8],
     ) -> Result<(), &'static str> {
+        // FIXME: dynamically allocate multiple ethernet frames
+        const MAX_PAYLOAD_SIZE: usize = 1500 /* bytes */;
+        if payload.len() > MAX_PAYLOAD_SIZE {
+            panic!("Payload is too large!");
+        }
+
         let frame = EthernetFrame {
             dst_mac,
             src_mac: *self.get_mac_addr(),
@@ -80,7 +86,7 @@ impl dyn NetworkDriver {
         let mut frame_buf = vec![0; FRAME_LEN + payload.len()];
         let len = frame.write_into(&mut frame_buf)?;
 
-        &self.send_raw_data(&frame_buf[..len])?;
+        self.send_raw_data(&frame_buf[..len])?;
         Ok(())
     }
 }
@@ -119,7 +125,8 @@ impl Display for MacAddr {
 #[derive(Debug, Clone, Copy)]
 #[repr(u16)]
 pub enum EtherType {
-    ARP = 0x806,
+    IPv4 = 0x0800,
+    ARP = 0x0806,
 }
 
 pub const ETHERNET_HEADER_SIZE: usize = 6 + 6 + 2;

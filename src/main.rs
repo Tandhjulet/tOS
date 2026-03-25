@@ -5,7 +5,7 @@
 #![reexport_test_harness_main = "test_main"]
 
 use bootloader::{BootInfo, entry_point};
-use core::panic::PanicInfo;
+use core::{net::Ipv4Addr, panic::PanicInfo};
 use tOS::{
     allocator, interrupts,
     networking::{self, protocols::arp::Arp},
@@ -28,7 +28,7 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
 
     interrupts::load_idt();
 
-    Arp::send().unwrap();
+    Arp::discover(&Ipv4Addr::new(255, 255, 255, 255)).unwrap();
 
     let mut executor = Executor::new();
     executor.spawn(Task::new(keyboard::print_keypresses()));
