@@ -16,7 +16,7 @@ use crate::{
     allocator::mmio::{self, alloc_dma_region},
     helpers,
     interrupts::{IDT, MIN_INTERRUPT, PICS},
-    networking::{MacAddr, NETWORK_DRIVER, NetworkDriver},
+    networking::{self, MacAddr, NETWORK_DRIVER, NetworkDriver},
     pci::{
         PciDevice,
         bar::{AnyBAR, BAR},
@@ -430,7 +430,7 @@ impl E1000 {
                 core::slice::from_raw_parts(self.get_desc_buffer_ptr(curr_idx), len as usize)
             };
 
-            println!("Received packet: {:?}", packet);
+            networking::handle_packet(packet);
 
             desc.status = 0;
             self.rx_cur = (self.rx_cur + 1) % (E1000_NUM_RX_DESC as u16);

@@ -61,34 +61,44 @@ impl dyn NetworkDriver {
             PICS.lock().notify_end_of_interrupt(irq_line);
         }
     }
+}
 
-    // FIXME: this requires a lock to run which is inefficient and unnecessary.
-    pub fn send_packet(
-        &mut self,
-        dst_mac: MacAddr,
-        ethertype: EtherType,
-        payload: &[u8],
-    ) -> Result<(), &'static str> {
-        // FIXME: dynamically allocate multiple ethernet frames
-        const MAX_PAYLOAD_SIZE: usize = 1500 /* bytes */;
-        if payload.len() > MAX_PAYLOAD_SIZE {
-            panic!("Payload is too large!");
-        }
-
-        let frame = EthernetFrame {
-            dst_mac,
-            src_mac: *self.get_mac_addr(),
-            ethertype,
-            payload,
-        };
-
-        const FRAME_LEN: usize = EthernetFrame::header_len();
-        let mut frame_buf = vec![0; FRAME_LEN + payload.len()];
-        let len = frame.write_into(&mut frame_buf)?;
-
-        self.send_raw_data(&frame_buf[..len])?;
-        Ok(())
+pub(self) fn handle_packet(raw: &[u8]) {
+    let packet = EthernetFrame::parse(raw);
+    match packet.ethertype {
+        EtherType::IPv4 => {}
+        EtherType::ARP => {}
     }
+}
+
+pub(self) fn send_packet(
+    dst_mac: MacAddr,
+    ethertype: EtherType,
+    payload: &[u8],
+) -> Result<(), &'static str> {
+    // FIXME: dynamically allocate multiple ethernet frames
+    const MAX_PAYLOAD_SIZE: usize = 1500 /* bytes */;
+    if payload.len() > MAX_PAYLOAD_SIZE {
+        panic!("Payload is too large!");
+    }
+
+    const FRAME_LEN: usize = EthernetFrame::header_len();
+    let mut frame_buf = vec![0; FRAME_LEN + payload.len()];
+
+    let mut lock = NETWORK_DRIVER.lock();
+    let driver = lock.as_mut().unwrap();
+
+    let frame = EthernetFrame {
+        dst_mac,
+        src_mac: *driver.get_mac_addr(),
+        ethertype,
+        payload,
+    };
+
+    let len = frame.write_into(&mut frame_buf)?;
+
+    driver.send_raw_data(&frame_buf[..len])?;
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,6 +117,16 @@ impl MacAddr {
         MacAddr {
             raw: [0x0, 0x0, 0x0, 0x0, 0x0, 0x0],
         }
+    }
+
+    pub fn from_bytes(raw: &[u8]) -> Self {
+        if raw.len() != 6 {
+            panic!("Cannot create a MacAddr from {} bytes!", raw.len());
+        }
+        let mut bytes = [0u8; 6];
+        bytes.copy_from_slice(raw);
+
+        Self { raw: bytes }
     }
 }
 
@@ -129,6 +149,15 @@ pub enum EtherType {
     ARP = 0x0806,
 }
 
+impl TryFrom<u16> for EtherType {
+    type Error = &'static str;
+
+    fn try_from(value: u16) -> Result<Self, Self::Error> {
+        // FIXME
+        Ok(unsafe { core::mem::transmute(value) })
+    }
+}
+
 pub const ETHERNET_HEADER_SIZE: usize = 6 + 6 + 2;
 
 // See https://www.intel.com/content/dam/doc/manual/pci-pci-x-family-gbe-controllers-software-dev-manual.pdf#page85
@@ -148,6 +177,22 @@ impl<'a> EthernetFrame<'a> {
         ethertype: EtherType,
         payload: &'a [u8],
     ) -> Self {
+        Self {
+            dst_mac,
+            src_mac,
+            ethertype,
+            payload,
+        }
+    }
+
+    pub fn parse(raw: &'a [u8]) -> Self {
+        let dst_mac = MacAddr::from_bytes(&raw[0..6]);
+        let src_mac = MacAddr::from_bytes(&raw[6..12]);
+
+        let raw_type = u16::from_be_bytes([raw[12], raw[13]]);
+        let ethertype = EtherType::try_from(raw_type).unwrap();
+        let payload = &raw[ETHERNET_HEADER_SIZE..];
+
         Self {
             dst_mac,
             src_mac,

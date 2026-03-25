@@ -3,7 +3,7 @@ use core::net::Ipv4Addr;
 use alloc::collections::btree_map::BTreeMap;
 use spin::Mutex;
 
-use crate::networking::{EtherType, MacAddr, NETWORK_DRIVER};
+use crate::networking::{self, EtherType, MacAddr, NETWORK_DRIVER};
 
 static ARP_CACHE: Mutex<BTreeMap<Ipv4Addr, MacAddr>> = Mutex::new(BTreeMap::new());
 
@@ -11,17 +11,19 @@ pub struct Arp {}
 
 impl Arp {
     pub fn discover(ip: &Ipv4Addr) -> Result<(), &'static str> {
-        let mut lock = NETWORK_DRIVER.lock();
-        let driver = lock.as_mut().unwrap();
-        let mac = driver.get_mac_addr();
+        let mac = {
+            let mut lock = NETWORK_DRIVER.lock();
+            let driver = lock.as_mut().unwrap();
+            *driver.get_mac_addr()
+        };
 
         const ARP_LEN: usize = ArpMessage::len();
         let mut arp_buf = [0u8; ARP_LEN];
-        let arp = ArpMessage::new(*mac, *ip);
+        let arp = ArpMessage::new(mac, *ip);
         let arp_len = arp.write_to(&mut arp_buf);
 
         // FIXME: make some sort of async waker such this can return when response is gotten
-        driver.send_packet(MacAddr::broadcast(), EtherType::ARP, &arp_buf[..arp_len])?;
+        networking::send_packet(MacAddr::broadcast(), EtherType::ARP, &arp_buf[..arp_len])?;
         Ok(())
     }
 
