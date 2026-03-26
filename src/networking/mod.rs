@@ -7,7 +7,14 @@ use alloc::{boxed::Box, sync::Arc, vec};
 use spin::Mutex;
 use x86_64::structures::idt::InterruptStackFrame;
 
-use crate::{interrupts::PICS, networking::drivers::E1000, println};
+use crate::{
+    interrupts::PICS,
+    networking::{
+        drivers::E1000,
+        protocols::{arp::Arp, ip::IP},
+    },
+    println,
+};
 
 pub static NETWORK_DRIVER: Mutex<Option<Box<dyn NetworkDriver>>> = Mutex::new(None);
 
@@ -65,9 +72,13 @@ impl dyn NetworkDriver {
 
 pub(self) fn handle_packet(raw: &[u8]) {
     let packet = EthernetFrame::parse(raw);
-    match packet.ethertype {
-        EtherType::IPv4 => {}
-        EtherType::ARP => {}
+    let res = match packet.ethertype {
+        EtherType::IPv4 => IP::handle_packet(packet),
+        EtherType::ARP => Arp::handle_packet(packet),
+    };
+
+    if let Err(msg) = res {
+        println!("NETWORK ERR: {}", msg);
     }
 }
 

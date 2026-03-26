@@ -2,7 +2,7 @@ use core::net::Ipv4Addr;
 
 use alloc::vec::Vec;
 
-use crate::networking::{self, EtherType, MacAddr};
+use crate::networking::{self, EtherType, EthernetFrame, MacAddr};
 
 pub struct IP {
     _private: (),
@@ -20,6 +20,10 @@ impl IP {
 
         // TODO: get mac with arp
         networking::send_packet(MacAddr::zero(), EtherType::IPv4, data)?;
+        Ok(())
+    }
+
+    pub fn handle_packet(packet: EthernetFrame) -> Result<(), &'static str> {
         Ok(())
     }
 }

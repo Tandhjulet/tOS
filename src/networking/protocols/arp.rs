@@ -3,7 +3,7 @@ use core::net::Ipv4Addr;
 use alloc::collections::btree_map::BTreeMap;
 use spin::Mutex;
 
-use crate::networking::{self, EtherType, MacAddr, NETWORK_DRIVER};
+use crate::networking::{self, EtherType, EthernetFrame, MacAddr, NETWORK_DRIVER};
 
 static ARP_CACHE: Mutex<BTreeMap<Ipv4Addr, MacAddr>> = Mutex::new(BTreeMap::new());
 
@@ -38,6 +38,12 @@ impl Arp {
         Arp::discover(ip).unwrap();
         None
     }
+
+    pub fn handle_packet(packet: EthernetFrame) -> Result<(), &'static str> {
+        let arp_response = ArpMessage::from(packet.payload)?;
+
+        Ok(())
+    }
 }
 
 pub struct ArpMessage {
@@ -64,6 +70,34 @@ impl ArpMessage {
             dst_hw_addr: DST_HW_ADDR,
             dst_pc_addr: to_discover,
         }
+    }
+
+    pub fn from(packet: &[u8]) -> Result<Self, &'static str> {
+        if packet.len() != ArpMessage::len() {
+            return Err("buffer is not correctly sized");
+        }
+
+        let raw_op = u16::from_be_bytes([packet[6], packet[7]]);
+        let operation = Operation::try_from(raw_op).unwrap();
+
+        let src_hw = MacAddr::from_bytes(&packet[8..14]);
+
+        let mut raw_ip = [0u8; 4];
+        raw_ip.copy_from_slice(&packet[14..18]);
+        let src_ip = Ipv4Addr::new(raw_ip[0], raw_ip[1], raw_ip[2], raw_ip[3]);
+
+        let dst_hw = MacAddr::from_bytes(&packet[18..24]);
+
+        raw_ip.copy_from_slice(&packet[24..28]);
+        let dst_ip = Ipv4Addr::new(raw_ip[0], raw_ip[1], raw_ip[2], raw_ip[3]);
+
+        Ok(Self {
+            operation,
+            dst_hw_addr: dst_hw,
+            dst_pc_addr: dst_ip,
+            src_hw_addr: src_hw,
+            src_pc_addr: src_ip,
+        })
     }
 
     pub const fn len() -> usize {
@@ -97,6 +131,15 @@ pub enum Operation {
 impl Operation {
     pub fn to_bytes(&self) -> [u8; 2] {
         (*self as u16).to_be_bytes()
+    }
+}
+
+impl TryFrom<u16> for Operation {
+    type Error = &'static str;
+
+    fn try_from(value: u16) -> Result<Self, Self::Error> {
+        // FIXME
+        Ok(unsafe { core::mem::transmute(value) })
     }
 }
 
