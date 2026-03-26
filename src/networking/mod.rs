@@ -5,7 +5,7 @@ use core::fmt::Display;
 
 use alloc::{
     boxed::Box,
-    fmt::format,
+    format,
     string::{String, ToString},
     sync::Arc,
     vec,
@@ -207,9 +207,7 @@ impl<'a> EthernetFrame<'a> {
 
         let raw_type = u16::from_be_bytes([raw[12], raw[13]]);
         let ethertype = EtherType::try_from(raw_type)
-            .map_err(|v| format(format_args!("unknown ether type {}", v.number)))?;
-
-        println!("read ether type {:?} from {:#x}", ethertype, raw_type);
+            .map_err(|v| format!("unknown ether type {}", v.number))?;
 
         let payload = &raw[ETHERNET_HEADER_SIZE..];
 

@@ -1,6 +1,6 @@
 use core::{net::Ipv4Addr, task::Poll};
 
-use alloc::{collections::btree_map::BTreeMap, sync::Arc};
+use alloc::{collections::btree_map::BTreeMap, string::String, sync::Arc};
 use futures_util::task::AtomicWaker;
 use num_enum::TryFromPrimitive;
 use spin::Mutex;
@@ -58,7 +58,7 @@ impl Arp {
         Arp::discover(ip).await.ok()
     }
 
-    pub fn handle_packet(packet: EthernetFrame) -> Result<(), &'static str> {
+    pub fn handle_packet(packet: EthernetFrame) -> Result<(), String> {
         let arp_response = ArpMessage::from(&packet.payload[..ArpMessage::len()])?;
 
         ARP_CACHE
