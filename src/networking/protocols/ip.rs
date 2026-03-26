@@ -3,9 +3,9 @@ use core::net::Ipv4Addr;
 use alloc::{format, string::String, vec::Vec};
 use num_enum::TryFromPrimitive;
 
-use crate::{
-    networking::{self, EtherType, EthernetFrame, protocols::arp::Arp},
-    print, println,
+use crate::networking::{
+    self, EtherType, EthernetFrame,
+    protocols::{arp::Arp, udp::UDP},
 };
 
 pub struct IP {
@@ -20,30 +20,25 @@ impl IP {
         protocol: IPProtocol,
         data: &[u8],
     ) -> Result<(), String> {
-        let mut header = IPHeader::new(src, dst, protocol, data.len() as u16);
-        header.checksum = header.calculate_send_checksum();
-
-        let header_len = header.header_len();
-        let mut packet: Vec<u8> = Vec::with_capacity(header_len + data.len());
-        header.write_into(&mut packet[..header_len]);
-        packet.extend_from_slice(data);
+        let packet = IPPacket::new(src, dst, protocol, data);
 
         let mac = Arp::lookup(&dst)
             .await
             .ok_or(format!("failed to find addr {} via ARP", dst))?;
 
-        networking::send_packet(mac, EtherType::IPv4, data)?;
+        networking::send_packet(mac, EtherType::IPv4, &packet.to_payload())?;
         Ok(())
     }
 
     // TODO: handle fragmentation
     pub fn handle_packet(packet: EthernetFrame) -> Result<(), String> {
-        let header = IPHeader::from(packet.payload)?;
+        let packet = IPPacket::from(packet.payload)?;
+        let header = &packet.header;
 
         // Some protocols, like IGMP, offload the checksum validation to hardware
         if header.protocol.should_validate_checksum() {
             let checksum = header.calculate_recv_checksum();
-            if checksum != 0xFFFF {
+            if checksum != 0xFFFF && checksum != 0 {
                 return Err(format!(
                     "Checksum did not match for packet of type {:?}! Received {:#x} but expected 0xFFFF",
                     header.protocol, checksum
@@ -58,17 +53,49 @@ impl IP {
             ));
         }
 
-        let header_len = header.header_len();
-        let total_len = header.total_length as usize;
-
-        let payload = &packet.payload[header_len..total_len];
         match header.protocol {
             // IPProtocol::TCP => todo!(),
-            // IPProtocol::UDP => todo!(),
-            proto => println!("unimplemented protocol: {:?}", proto),
-        };
+            IPProtocol::UDP => UDP::handle_packet(packet),
+            proto => Err(format!("unimplemented protocol: {:?}", proto)),
+        }
+    }
+}
 
-        Ok(())
+pub struct IPPacket<'a> {
+    pub header: IPHeader,
+    pub data: &'a [u8],
+}
+
+impl<'a> IPPacket<'a> {
+    pub fn new(
+        src_addr: Ipv4Addr,
+        dst_addr: Ipv4Addr,
+        protocol: IPProtocol,
+        data: &'a [u8],
+    ) -> Self {
+        let mut header = IPHeader::new(src_addr, dst_addr, protocol, data.len() as u16);
+        header.checksum = header.calculate_send_checksum();
+
+        Self { header, data }
+    }
+
+    pub fn from(payload: &'a [u8]) -> Result<Self, String> {
+        let header = IPHeader::from(payload)?;
+
+        let data_range = header.header_len()..(header.total_length as usize);
+        let data = &payload[data_range];
+
+        Ok(Self { header, data })
+    }
+
+    pub fn to_payload(&self) -> Vec<u8> {
+        let header_len = self.header.header_len();
+
+        let mut packet: Vec<u8> = Vec::with_capacity(header_len + self.data.len());
+        self.header.write_into(&mut packet[..header_len]);
+        packet.extend_from_slice(self.data);
+
+        packet
     }
 }
 

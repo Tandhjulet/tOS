@@ -1,4 +1,48 @@
-struct UDP {}
+use core::net::Ipv4Addr;
+
+use alloc::{format, string::String, vec::Vec};
+
+use crate::{
+    networking::protocols::ip::{IP, IPPacket, IPProtocol},
+    println,
+};
+
+pub struct UDP {}
+
+impl UDP {
+    pub async fn send_packet(
+        src_ip: Ipv4Addr,
+        dst_ip: Ipv4Addr,
+        dst_port: u16,
+        src_port: u16,
+        data: &[u8],
+    ) -> Result<(), String> {
+        let message = UdpMessage::new(src_port, dst_port, data);
+        let payload = message.to_payload();
+
+        IP::send_packet(src_ip, dst_ip, IPProtocol::UDP, &payload).await?;
+        Ok(())
+    }
+
+    pub fn handle_packet(packet: IPPacket) -> Result<(), String> {
+        let message = UdpMessage::from(packet.data);
+
+        if !message.validate_checksum() {
+            return Err(format!(
+                "Checksum {} does not match expected {}!",
+                message.checksum,
+                message.calculate_checksum()
+            ));
+        }
+
+        println!(
+            "received message for port {} from port {}",
+            message.dst_port, message.src_port
+        );
+
+        Ok(())
+    }
+}
 
 struct UdpMessage<'a> {
     src_port: u16,
@@ -8,4 +52,59 @@ struct UdpMessage<'a> {
     checksum: u16,
 
     data: &'a [u8],
+}
+
+impl<'a> UdpMessage<'a> {
+    pub fn new(src_port: u16, dst_port: u16, data: &'a [u8]) -> Self {
+        UdpMessage {
+            src_port,
+            dst_port,
+            length: data.len() as u16,
+            checksum: 0,
+            data,
+        }
+    }
+
+    pub fn from(payload: &'a [u8]) -> Self {
+        let src_port = u16::from_be_bytes([payload[0], payload[1]]);
+        let dst_port = u16::from_be_bytes([payload[2], payload[3]]);
+        let length = u16::from_be_bytes([payload[4], payload[5]]);
+        let checksum = u16::from_be_bytes([payload[6], payload[7]]);
+
+        let data = &payload[8..(length as usize)];
+
+        Self {
+            src_port,
+            dst_port,
+            length,
+            checksum,
+            data,
+        }
+    }
+
+    pub const fn header_len() -> usize {
+        8
+    }
+
+    pub fn to_payload(&self) -> Vec<u8> {
+        let data_len = self.length as usize;
+        let mut buf: Vec<u8> = Vec::with_capacity(data_len + UdpMessage::header_len());
+
+        buf[0..2].copy_from_slice(&self.src_port.to_be_bytes());
+        buf[2..4].copy_from_slice(&self.dst_port.to_be_bytes());
+        buf[4..6].copy_from_slice(&self.length.to_be_bytes());
+        buf[6..8].copy_from_slice(&self.checksum.to_be_bytes());
+        buf[8..data_len].copy_from_slice(&self.data);
+
+        buf
+    }
+
+    // TODO: implement checksumming (it's optional in ipv4)
+    pub fn calculate_checksum(&self) -> u16 {
+        0
+    }
+
+    pub fn validate_checksum(&self) -> bool {
+        true
+    }
 }
