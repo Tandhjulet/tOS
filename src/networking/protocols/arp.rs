@@ -36,8 +36,11 @@ impl Arp {
 
     pub async fn discover(ip: &Ipv4Addr) -> Result<MacAddr, &'static str> {
         PENDING_ARP.lock().insert(*ip, (None, None));
-        // FIXME: if request fails remove from PENDING_ARP
-        Arp::send_request(ip)?;
+
+        if let Err(msg) = Arp::send_request(ip) {
+            PENDING_ARP.lock().remove(ip);
+            return Err(msg);
+        }
 
         Ok(ArpFuture { ip: *ip }.await)
     }
@@ -50,11 +53,7 @@ impl Arp {
             }
         }
 
-        let res = Arp::discover(ip);
-        println!("waiting for response...");
-        let res = res.await;
-        println!("finished waiting!");
-        res.ok()
+        Arp::discover(ip).await.ok()
     }
 
     pub fn handle_packet(packet: EthernetFrame) -> Result<(), &'static str> {
