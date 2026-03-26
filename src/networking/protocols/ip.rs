@@ -13,6 +13,7 @@ pub struct IP {
 }
 
 impl IP {
+    // TODO: fragment big packets
     pub async fn send_packet(
         src: Ipv4Addr,
         dst: Ipv4Addr,
@@ -20,7 +21,7 @@ impl IP {
         data: &[u8],
     ) -> Result<(), String> {
         let mut header = IPHeader::new(src, dst, protocol, data.len() as u16);
-        header.checksum = header.calculate_checksum();
+        header.checksum = header.calculate_send_checksum();
 
         let header_len = header.header_len();
         let mut packet: Vec<u8> = Vec::with_capacity(header_len + data.len());
@@ -35,8 +36,20 @@ impl IP {
         Ok(())
     }
 
+    // TODO: handle fragmentation
     pub fn handle_packet(packet: EthernetFrame) -> Result<(), String> {
         let header = IPHeader::from(packet.payload)?;
+
+        // Some protocols, like IGMP, offload the checksum validation to hardware
+        if header.protocol.should_validate_checksum() {
+            let checksum = header.calculate_recv_checksum();
+            if checksum != 0xFFFF {
+                return Err(format!(
+                    "Checksum did not match for packet of type {:?}! Received {:#x} but expected 0xFFFF",
+                    header.protocol, checksum
+                ));
+            }
+        }
 
         if header.version != 4 {
             return Err(format!(
@@ -49,9 +62,6 @@ impl IP {
         let total_len = header.total_length as usize;
 
         let payload = &packet.payload[header_len..total_len];
-        println!("received {:?}", payload);
-        println!("from: {}", header.src_addr);
-
         match header.protocol {
             // IPProtocol::TCP => todo!(),
             // IPProtocol::UDP => todo!(),
@@ -171,21 +181,27 @@ impl IPHeader {
         buf[16..20].copy_from_slice(&self.dst_addr.octets());
     }
 
-    pub fn calculate_checksum(&mut self) -> u16 {
+    fn calculate_sum(&self, include_checksum: bool) -> u32 {
         let mut sum: u32 = 0;
 
-        // Version + IHL
-        sum += ((self.version as u16) << 8 | self.ihl as u16) as u32;
-        // DSCP + ECN
-        sum += ((self.dscp as u16) << 2 | self.ecn as u16) as u32;
+        let first_word = ((self.version as u16) << 12)
+            | ((self.ihl as u16) << 8)
+            | ((self.dscp as u16) << 2)
+            | (self.ecn as u16);
+        sum += first_word as u32;
+
         sum += self.total_length as u32;
         sum += self.identification as u32;
         // Flags + Fragment Offset
         sum += ((self.flags as u16) << 13 | self.fragment_offset) as u32;
         // TTL + Protocol
         sum += ((self.ttl as u16) << 8 | self.protocol as u16) as u32;
+
         // Checksum field is zero during calculation
-        sum += 0u32;
+        if include_checksum {
+            sum += self.checksum as u32;
+        }
+
         // Source address
         sum += u16::from_be_bytes([self.src_addr.octets()[0], self.src_addr.octets()[1]]) as u32;
         sum += u16::from_be_bytes([self.src_addr.octets()[2], self.src_addr.octets()[3]]) as u32;
@@ -193,19 +209,30 @@ impl IPHeader {
         sum += u16::from_be_bytes([self.dst_addr.octets()[0], self.dst_addr.octets()[1]]) as u32;
         sum += u16::from_be_bytes([self.dst_addr.octets()[2], self.dst_addr.octets()[3]]) as u32;
 
-        // Fold 32-bit sum into 16 bits by adding the carry
+        sum
+    }
+
+    fn fold_sum(mut sum: u32) -> u16 {
         while sum >> 16 != 0 {
             sum = (sum & 0xFFFF) + (sum >> 16);
         }
 
-        let final_sum = !(sum as u16);
-        self.checksum = final_sum;
-        final_sum
+        sum as u16
+    }
+
+    pub fn calculate_send_checksum(&self) -> u16 {
+        let sum = IPHeader::fold_sum(self.calculate_sum(false));
+        !sum
+    }
+
+    pub fn calculate_recv_checksum(&self) -> u16 {
+        let sum = IPHeader::fold_sum(self.calculate_sum(true));
+        sum
     }
 }
 
 // https://en.wikipedia.org/wiki/IPv4#Protocol
-#[derive(Debug, Clone, Copy, TryFromPrimitive)]
+#[derive(Debug, Clone, Copy, TryFromPrimitive, PartialEq, Eq)]
 #[repr(u8)]
 pub enum IPProtocol {
     ICMP = 1,
@@ -215,4 +242,10 @@ pub enum IPProtocol {
     ENCAP = 41,
     OSPF = 89,
     SCTP = 132,
+}
+
+impl IPProtocol {
+    pub fn should_validate_checksum(&self) -> bool {
+        *self == IPProtocol::TCP || *self == IPProtocol::UDP
+    }
 }

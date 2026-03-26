@@ -3,13 +3,7 @@ pub mod protocols;
 
 use core::fmt::Display;
 
-use alloc::{
-    boxed::Box,
-    format,
-    string::{String, ToString},
-    sync::Arc,
-    vec,
-};
+use alloc::{boxed::Box, format, string::String, sync::Arc, vec};
 use num_enum::TryFromPrimitive;
 use spin::Mutex;
 use x86_64::structures::idt::InterruptStackFrame;
