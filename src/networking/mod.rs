@@ -46,6 +46,8 @@ pub fn init() {
         NETWORK_DRIVER.lock()
     };
 
+    Arp::init();
+
     let driver = lock.as_mut().unwrap();
     driver.start();
 

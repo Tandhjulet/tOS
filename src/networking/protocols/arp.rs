@@ -1,17 +1,11 @@
-use core::{
-    net::Ipv4Addr,
-    task::{Poll, Waker},
-};
+use core::{net::Ipv4Addr, task::Poll};
 
 use alloc::{collections::btree_map::BTreeMap, sync::Arc};
 use futures_util::task::AtomicWaker;
 use num_enum::TryFromPrimitive;
 use spin::Mutex;
 
-use crate::{
-    networking::{self, EtherType, EthernetFrame, MacAddr, NETWORK_DRIVER},
-    println,
-};
+use crate::networking::{self, EtherType, EthernetFrame, MacAddr, NETWORK_DRIVER};
 
 static ARP_CACHE: Mutex<BTreeMap<Ipv4Addr, MacAddr>> = Mutex::new(BTreeMap::new());
 static PENDING_ARP: Mutex<BTreeMap<Ipv4Addr, Arc<AtomicWaker>>> = Mutex::new(BTreeMap::new());
@@ -19,6 +13,13 @@ static PENDING_ARP: Mutex<BTreeMap<Ipv4Addr, Arc<AtomicWaker>>> = Mutex::new(BTr
 pub struct Arp {}
 
 impl Arp {
+    pub(in crate::networking) fn init() {
+        // To allow DHCP, hardcode the broadcast entry
+        ARP_CACHE
+            .lock()
+            .insert(Ipv4Addr::new(255, 255, 255, 255), MacAddr::broadcast());
+    }
+
     fn send_request(ip: &Ipv4Addr) -> Result<(), &'static str> {
         let mac = {
             let mut lock = NETWORK_DRIVER.lock();
