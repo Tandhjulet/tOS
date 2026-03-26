@@ -1,16 +1,25 @@
-use core::net::Ipv4Addr;
+use core::{
+    net::Ipv4Addr,
+    task::{Poll, Waker},
+};
 
 use alloc::collections::btree_map::BTreeMap;
+use num_enum::TryFromPrimitive;
 use spin::Mutex;
 
-use crate::networking::{self, EtherType, EthernetFrame, MacAddr, NETWORK_DRIVER};
+use crate::{
+    networking::{self, EtherType, EthernetFrame, MacAddr, NETWORK_DRIVER},
+    println,
+};
 
 static ARP_CACHE: Mutex<BTreeMap<Ipv4Addr, MacAddr>> = Mutex::new(BTreeMap::new());
+static PENDING_ARP: Mutex<BTreeMap<Ipv4Addr, (Option<Waker>, Option<MacAddr>)>> =
+    Mutex::new(BTreeMap::new());
 
 pub struct Arp {}
 
 impl Arp {
-    pub fn discover(ip: &Ipv4Addr) -> Result<(), &'static str> {
+    fn send_request(ip: &Ipv4Addr) -> Result<(), &'static str> {
         let mac = {
             let mut lock = NETWORK_DRIVER.lock();
             let driver = lock.as_mut().unwrap();
@@ -22,30 +31,80 @@ impl Arp {
         let arp = ArpMessage::new(mac, *ip);
         let arp_len = arp.write_to(&mut arp_buf);
 
-        // FIXME: make some sort of async waker such this can return when response is gotten
-        networking::send_packet(MacAddr::broadcast(), EtherType::ARP, &arp_buf[..arp_len])?;
-        Ok(())
+        networking::send_packet(MacAddr::broadcast(), EtherType::ARP, &arp_buf[..arp_len])
     }
 
-    pub fn lookup(ip: &Ipv4Addr) -> Option<MacAddr> {
-        let lock = ARP_CACHE.lock();
-        let cache_res = lock.get(ip);
-        if let Some(mac) = cache_res {
-            return Some(*mac);
-        }
-        drop(lock);
+    pub async fn discover(ip: &Ipv4Addr) -> Result<MacAddr, &'static str> {
+        PENDING_ARP.lock().insert(*ip, (None, None));
+        // FIXME: if request fails remove from PENDING_ARP
+        Arp::send_request(ip)?;
 
-        Arp::discover(ip).unwrap();
-        None
+        Ok(ArpFuture { ip: *ip }.await)
+    }
+
+    pub async fn lookup(ip: &Ipv4Addr) -> Option<MacAddr> {
+        {
+            let lock = ARP_CACHE.lock();
+            if let Some(mac) = lock.get(ip) {
+                return Some(*mac);
+            }
+        }
+
+        let res = Arp::discover(ip);
+        println!("waiting for response...");
+        let res = res.await;
+        println!("finished waiting!");
+        res.ok()
     }
 
     pub fn handle_packet(packet: EthernetFrame) -> Result<(), &'static str> {
-        let arp_response = ArpMessage::from(packet.payload)?;
+        let arp_response = ArpMessage::from(&packet.payload[..ArpMessage::len()])?;
+
+        ARP_CACHE
+            .lock()
+            .insert(arp_response.src_pc_addr, arp_response.src_hw_addr);
+
+        let mut pending = PENDING_ARP.lock();
+        if let Some((waker, _)) = pending.remove(&arp_response.src_pc_addr) {
+            if let Some(waker) = waker {
+                waker.wake();
+            }
+        }
 
         Ok(())
     }
 }
 
+struct ArpFuture {
+    ip: Ipv4Addr,
+}
+
+impl Future for ArpFuture {
+    type Output = MacAddr;
+
+    fn poll(
+        self: core::pin::Pin<&mut Self>,
+        cx: &mut core::task::Context<'_>,
+    ) -> core::task::Poll<Self::Output> {
+        if let Some(mac) = ARP_CACHE.lock().get(&self.ip) {
+            return Poll::Ready(*mac);
+        }
+
+        if let Some((waker_slot, _)) = PENDING_ARP.lock().get_mut(&self.ip) {
+            *waker_slot = Some(cx.waker().clone());
+        }
+
+        Poll::Pending
+    }
+}
+
+impl Drop for ArpFuture {
+    fn drop(&mut self) {
+        PENDING_ARP.lock().remove(&self.ip);
+    }
+}
+
+#[derive(Debug)]
 pub struct ArpMessage {
     pub operation: Operation,
 
@@ -61,7 +120,7 @@ impl ArpMessage {
         const DST_HW_ADDR: MacAddr = MacAddr::zero();
 
         // hardcode IP until we get one
-        const SRC_IP: Ipv4Addr = Ipv4Addr::new(192, 168, 100, 1);
+        const SRC_IP: Ipv4Addr = Ipv4Addr::new(192, 168, 100, 2);
 
         Self {
             operation: Operation::ArpRequest,
@@ -119,7 +178,7 @@ impl ArpMessage {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, TryFromPrimitive)]
 #[repr(u16)]
 pub enum Operation {
     ArpRequest = 0x1,
@@ -131,15 +190,6 @@ pub enum Operation {
 impl Operation {
     pub fn to_bytes(&self) -> [u8; 2] {
         (*self as u16).to_be_bytes()
-    }
-}
-
-impl TryFrom<u16> for Operation {
-    type Error = &'static str;
-
-    fn try_from(value: u16) -> Result<Self, Self::Error> {
-        // FIXME
-        Ok(unsafe { core::mem::transmute(value) })
     }
 }
 

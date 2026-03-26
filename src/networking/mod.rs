@@ -3,7 +3,14 @@ pub mod protocols;
 
 use core::fmt::Display;
 
-use alloc::{boxed::Box, sync::Arc, vec};
+use alloc::{
+    boxed::Box,
+    fmt::format,
+    string::{String, ToString},
+    sync::Arc,
+    vec,
+};
+use num_enum::TryFromPrimitive;
 use spin::Mutex;
 use x86_64::structures::idt::InterruptStackFrame;
 
@@ -72,6 +79,11 @@ impl dyn NetworkDriver {
 
 pub(self) fn handle_packet(raw: &[u8]) {
     let packet = EthernetFrame::parse(raw);
+    if packet.is_err() {
+        return;
+    }
+
+    let packet = packet.unwrap();
     let res = match packet.ethertype {
         EtherType::IPv4 => IP::handle_packet(packet),
         EtherType::ARP => Arp::handle_packet(packet),
@@ -153,20 +165,11 @@ impl Display for MacAddr {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, TryFromPrimitive)]
 #[repr(u16)]
 pub enum EtherType {
     IPv4 = 0x0800,
     ARP = 0x0806,
-}
-
-impl TryFrom<u16> for EtherType {
-    type Error = &'static str;
-
-    fn try_from(value: u16) -> Result<Self, Self::Error> {
-        // FIXME
-        Ok(unsafe { core::mem::transmute(value) })
-    }
 }
 
 pub const ETHERNET_HEADER_SIZE: usize = 6 + 6 + 2;
@@ -196,20 +199,24 @@ impl<'a> EthernetFrame<'a> {
         }
     }
 
-    pub fn parse(raw: &'a [u8]) -> Self {
+    pub fn parse(raw: &'a [u8]) -> Result<Self, String> {
         let dst_mac = MacAddr::from_bytes(&raw[0..6]);
         let src_mac = MacAddr::from_bytes(&raw[6..12]);
 
         let raw_type = u16::from_be_bytes([raw[12], raw[13]]);
-        let ethertype = EtherType::try_from(raw_type).unwrap();
+        let ethertype = EtherType::try_from(raw_type)
+            .map_err(|v| format(format_args!("unknown ether type {}", v.number)))?;
+
+        println!("read ether type {:?} from {:#x}", ethertype, raw_type);
+
         let payload = &raw[ETHERNET_HEADER_SIZE..];
 
-        Self {
+        Ok(Self {
             dst_mac,
             src_mac,
             ethertype,
             payload,
-        }
+        })
     }
 
     pub const fn header_len() -> usize {
