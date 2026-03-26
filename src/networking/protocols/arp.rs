@@ -3,7 +3,8 @@ use core::{
     task::{Poll, Waker},
 };
 
-use alloc::collections::btree_map::BTreeMap;
+use alloc::{collections::btree_map::BTreeMap, sync::Arc};
+use futures_util::task::AtomicWaker;
 use num_enum::TryFromPrimitive;
 use spin::Mutex;
 
@@ -13,8 +14,7 @@ use crate::{
 };
 
 static ARP_CACHE: Mutex<BTreeMap<Ipv4Addr, MacAddr>> = Mutex::new(BTreeMap::new());
-static PENDING_ARP: Mutex<BTreeMap<Ipv4Addr, (Option<Waker>, Option<MacAddr>)>> =
-    Mutex::new(BTreeMap::new());
+static PENDING_ARP: Mutex<BTreeMap<Ipv4Addr, Arc<AtomicWaker>>> = Mutex::new(BTreeMap::new());
 
 pub struct Arp {}
 
@@ -35,14 +35,15 @@ impl Arp {
     }
 
     pub async fn discover(ip: &Ipv4Addr) -> Result<MacAddr, &'static str> {
-        PENDING_ARP.lock().insert(*ip, (None, None));
+        let waker = Arc::new(AtomicWaker::new());
+        PENDING_ARP.lock().insert(*ip, waker.clone());
 
         if let Err(msg) = Arp::send_request(ip) {
             PENDING_ARP.lock().remove(ip);
             return Err(msg);
         }
 
-        Ok(ArpFuture { ip: *ip }.await)
+        Ok(ArpFuture { ip: *ip, waker }.await)
     }
 
     pub async fn lookup(ip: &Ipv4Addr) -> Option<MacAddr> {
@@ -64,10 +65,8 @@ impl Arp {
             .insert(arp_response.src_pc_addr, arp_response.src_hw_addr);
 
         let mut pending = PENDING_ARP.lock();
-        if let Some((waker, _)) = pending.remove(&arp_response.src_pc_addr) {
-            if let Some(waker) = waker {
-                waker.wake();
-            }
+        if let Some(waker) = pending.remove(&arp_response.src_pc_addr) {
+            waker.wake();
         }
 
         Ok(())
@@ -76,6 +75,7 @@ impl Arp {
 
 struct ArpFuture {
     ip: Ipv4Addr,
+    waker: Arc<AtomicWaker>,
 }
 
 impl Future for ArpFuture {
@@ -85,12 +85,10 @@ impl Future for ArpFuture {
         self: core::pin::Pin<&mut Self>,
         cx: &mut core::task::Context<'_>,
     ) -> core::task::Poll<Self::Output> {
+        self.waker.register(cx.waker());
+
         if let Some(mac) = ARP_CACHE.lock().get(&self.ip) {
             return Poll::Ready(*mac);
-        }
-
-        if let Some((waker_slot, _)) = PENDING_ARP.lock().get_mut(&self.ip) {
-            *waker_slot = Some(cx.waker().clone());
         }
 
         Poll::Pending
