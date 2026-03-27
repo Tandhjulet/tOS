@@ -40,11 +40,14 @@ impl UDP {
             message.dst_port, message.src_port
         );
 
+        // FIXME: abstract this dynamically
+        if message.dst_port == 68 {}
+
         Ok(())
     }
 }
 
-struct UdpMessage<'a> {
+pub struct UdpMessage<'a> {
     src_port: u16,
     dst_port: u16,
 
