@@ -6,6 +6,7 @@ use num_enum::TryFromPrimitive;
 use spin::Mutex;
 
 use crate::networking::NETWORK_INFO;
+use crate::networking::protocols::dhcp;
 use crate::networking::{
     HardwareType, MacAddr,
     protocols::udp::{UDP, UdpMessage},
@@ -28,11 +29,9 @@ impl DHCP {
             .message_type(DhcpMessageType::DhcpDiscover)
             .client_identifier(HardwareType::Ethernet, mac.octets().to_vec())
             .parameter_request_list([
-                0x1,  // subnet mask
-                0x3,  // router
-                0x6,  // domain name server
-                0xf,  // domain name
-                0x39, // max. DHCP message size
+                DhcpOptionKind::SubnetMask,       // subnet mask
+                DhcpOptionKind::Routers,          // router
+                DhcpOptionKind::DomainNameServer, // domain name server
             ]);
 
         let dhcp_broadcast = DhcpMessage::new(mac, "t_os".to_owned(), options);
@@ -51,7 +50,18 @@ impl DHCP {
         .unwrap();
     }
 
-    pub fn request(req_ip: Ipv4Addr) {}
+    pub async fn request(req_ip: Ipv4Addr) {
+        let mac = { NETWORK_INFO.read().mac().unwrap() };
+
+        let options = DhcpOptions::new()
+            .message_type(DhcpMessageType::DhcpRequest)
+            .client_identifier(HardwareType::Ethernet, mac.octets().to_vec())
+            .parameter_request_list([
+                DhcpOptionKind::SubnetMask,       // subnet mask
+                DhcpOptionKind::Routers,          // router
+                DhcpOptionKind::DomainNameServer, // domain name server
+            ]);
+    }
 
     pub fn handle_packet(packet: UdpMessage) -> Result<(), String> {
         let message = DhcpMessage::from(packet.data())?;
@@ -63,12 +73,37 @@ impl DHCP {
             return Err("Unknown DHCP type".to_owned());
         };
 
-        if *dhcp_type == DhcpMessageType::DhcpOffer && CURRENT_OFFER.lock().is_some() {
-            println!("Dropping offer... already have one!");
-            return Ok(());
-        }
+        match dhcp_type {
+            DhcpMessageType::DhcpOffer => {
+                if *dhcp_type == DhcpMessageType::DhcpOffer && CURRENT_OFFER.lock().is_some() {
+                    println!("Dropping offer... already have one!");
+                    return Ok(());
+                }
+                let ip_addr = message.yiaddr;
+                *CURRENT_OFFER.lock() = Some(message);
 
-        *CURRENT_OFFER.lock() = Some(message);
+                DHCP::request(ip_addr);
+            }
+            DhcpMessageType::DhcpAck => {
+                NETWORK_INFO.write().ip = Some(message.yiaddr);
+            }
+            DhcpMessageType::DhcpNak => {
+                // TODO: re-discover
+                println!("Received NAK!");
+            }
+
+            // C -> S (unapplicable)
+            DhcpMessageType::DhcpDiscover
+            | DhcpMessageType::DhcpRelease
+            | DhcpMessageType::DhcpDecline
+            | DhcpMessageType::DhcpInform
+            | DhcpMessageType::DhcpRequest => {
+                println!(
+                    "Received {:?} despite it being a C->S packet (?)",
+                    dhcp_type
+                )
+            }
+        }
 
         Ok(())
     }
@@ -254,7 +289,7 @@ impl DhcpOptions {
         self
     }
 
-    pub fn parameter_request_list(mut self, params: impl Into<Vec<u8>>) -> Self {
+    pub fn parameter_request_list(mut self, params: impl Into<Vec<DhcpOptionKind>>) -> Self {
         self.options
             .push(DhcpOption::ParameterRequestList(params.into()));
         self
@@ -318,7 +353,7 @@ pub enum DhcpOption {
     MessageType(DhcpMessageType),
     RequestedIp(Ipv4Addr),
     Hostname(String),
-    ParameterRequestList(Vec<u8>),
+    ParameterRequestList(Vec<DhcpOptionKind>),
     LeaseTime(u32),
     ServerIdentifier(Ipv4Addr),
     ClientIdentifier { htype: HardwareType, data: Vec<u8> },
@@ -326,7 +361,7 @@ pub enum DhcpOption {
     End,
 }
 
-#[derive(PartialEq, Eq, Debug, TryFromPrimitive)]
+#[derive(PartialEq, Eq, Debug, TryFromPrimitive, Clone, Copy)]
 #[repr(u8)]
 pub enum DhcpOptionKind {
     SubnetMask = 1,
@@ -377,7 +412,10 @@ impl DhcpOption {
             DhcpOption::MessageType(t) => self.write_tag(buf, &[*t as u8]),
             DhcpOption::RequestedIp(ip) => self.write_tag(buf, &ip.octets()),
             DhcpOption::Hostname(name) => self.write_tag(buf, name.as_bytes()),
-            DhcpOption::ParameterRequestList(params) => self.write_tag(buf, params),
+            DhcpOption::ParameterRequestList(params) => {
+                let params: Vec<u8> = params.iter().map(|kind| (*kind) as u8).collect();
+                self.write_tag(buf, &params);
+            }
             DhcpOption::LeaseTime(secs) => self.write_tag(buf, &secs.to_be_bytes()),
             DhcpOption::ServerIdentifier(ip) => self.write_tag(buf, &ip.octets()),
             DhcpOption::ClientIdentifier { htype, data } => {
@@ -421,7 +459,14 @@ impl DhcpOption {
             DhcpOptionKind::Hostname => {
                 DhcpOption::Hostname(String::from_utf8(data.to_vec()).ok()?)
             }
-            DhcpOptionKind::ParameterRequestList => DhcpOption::ParameterRequestList(data.to_vec()),
+            DhcpOptionKind::ParameterRequestList => {
+                let reqs: Vec<DhcpOptionKind> = data
+                    .to_vec()
+                    .iter()
+                    .filter_map(|v| DhcpOptionKind::try_from(*v).ok())
+                    .collect();
+                DhcpOption::ParameterRequestList(reqs)
+            }
             DhcpOptionKind::LeaseTime => {
                 DhcpOption::LeaseTime(u32::from_be_bytes(data.try_into().ok()?))
             }
