@@ -196,7 +196,7 @@ pub enum EtherType {
     ARP = 0x0806,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, TryFromPrimitive)]
 #[repr(u16)]
 pub enum HardwareType {
     Ethernet = 0x1,

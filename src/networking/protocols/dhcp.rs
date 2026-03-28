@@ -1,12 +1,13 @@
 use core::net::Ipv4Addr;
 
-use alloc::vec;
 use alloc::{borrow::ToOwned, string::String, vec::Vec};
+use alloc::{format, vec};
 use num_enum::TryFromPrimitive;
+use spin::Mutex;
 
 use crate::networking::NETWORK_INFO;
 use crate::networking::{
-    EtherType, HardwareType, MacAddr, NETWORK_DRIVER,
+    HardwareType, MacAddr,
     protocols::udp::{UDP, UdpMessage},
 };
 use crate::println;
@@ -15,13 +16,15 @@ pub const DHCP_SERVER_PORT: u16 = 67;
 pub const DHCP_CLIENT_PORT: u16 = 68;
 pub const DHCP_TRANSACTION_IDENTIFIER: u32 = 0x55555555;
 
+static CURRENT_OFFER: Mutex<Option<DhcpMessage>> = Mutex::new(None);
+
 pub struct DHCP {}
 
 impl DHCP {
     pub async fn discover() {
         let mac = { NETWORK_INFO.read().mac().unwrap() };
 
-        let options = DhcpOptionsBuilder::new()
+        let options = DhcpOptions::new()
             .message_type(DhcpMessageType::DhcpDiscover)
             .client_identifier(HardwareType::Ethernet, mac.octets().to_vec())
             .parameter_request_list([
@@ -30,8 +33,7 @@ impl DHCP {
                 0x6,  // domain name server
                 0xf,  // domain name
                 0x39, // max. DHCP message size
-            ])
-            .build();
+            ]);
 
         let dhcp_broadcast = DhcpMessage::new(mac, "t_os".to_owned(), options);
 
@@ -51,17 +53,32 @@ impl DHCP {
 
     pub fn request(req_ip: Ipv4Addr) {}
 
-    pub fn handle_packet(packet: UdpMessage) {
-        let message = DhcpMessage::from(packet.data());
-        println!("{:?}", message);
+    pub fn handle_packet(packet: UdpMessage) -> Result<(), String> {
+        let message = DhcpMessage::from(packet.data())?;
+        let options = &message.options;
+
+        let Some(DhcpOption::MessageType(dhcp_type)) =
+            options.find_from_tag(DhcpOptionKind::MessageType)
+        else {
+            return Err("Unknown DHCP type".to_owned());
+        };
+
+        if *dhcp_type == DhcpMessageType::DhcpOffer && CURRENT_OFFER.lock().is_some() {
+            println!("Dropping offer... already have one!");
+            return Ok(());
+        }
+
+        *CURRENT_OFFER.lock() = Some(message);
+
+        Ok(())
     }
 }
 
 // see https://datatracker.ietf.org/doc/html/rfc2131
 #[derive(Debug)]
 pub struct DhcpMessage {
-    op: u8,
-    htype: u8,
+    op: BootpOperation,
+    htype: HardwareType,
     hlen: u8,
     hops: u8,
 
@@ -83,19 +100,19 @@ pub struct DhcpMessage {
     file: [u8; 128],
 
     // see https://datatracker.ietf.org/doc/html/rfc2132#section-4 for a list of options
-    options: Vec<u8>,
+    options: DhcpOptions,
 }
 
 impl DhcpMessage {
-    pub fn new(src_mac: MacAddr, host_name: String, options: Vec<u8>) -> Self {
+    pub fn new(src_mac: MacAddr, host_name: String, options: DhcpOptions) -> Self {
         let empty_ipv4 = Ipv4Addr::new(0, 0, 0, 0);
         let mut sname = [0u8; 64];
         let bytes = host_name.as_bytes();
         sname[..bytes.len()].copy_from_slice(bytes);
 
         Self {
-            op: BootpOperation::Request as u8,
-            htype: HardwareType::Ethernet as u8,
+            op: BootpOperation::Request,
+            htype: HardwareType::Ethernet,
             hlen: 6,
             hops: 0,
             xid: DHCP_TRANSACTION_IDENTIFIER,
@@ -112,9 +129,13 @@ impl DhcpMessage {
         }
     }
 
-    pub fn from(payload: &[u8]) -> Self {
-        let op = payload[0];
-        let htype = payload[1];
+    pub fn from(payload: &[u8]) -> Result<Self, String> {
+        let op = BootpOperation::try_from(payload[0])
+            .map_err(|err| format!("failed to map {} into a BOOTP operation!", err.number))?;
+
+        let htype = HardwareType::try_from(payload[1] as u16)
+            .map_err(|err| format!("failed to map {} into a hardware type!", err.number))?;
+
         let hlen = payload[2];
         if hlen != 6 {
             panic!("Don't support DHCP where CHADDR isnt a MAC!");
@@ -139,9 +160,9 @@ impl DhcpMessage {
         let mut file = [0u8; 128];
         file.clone_from_slice(&payload[108..236]);
 
-        let opts = &payload[236..];
+        let options = DhcpOptions::parse(&payload[236..]);
 
-        Self {
+        Ok(Self {
             op,
             htype,
             hlen,
@@ -156,14 +177,16 @@ impl DhcpMessage {
             chaddr,
             sname,
             file,
-            options: opts.to_vec(),
-        }
+            options,
+        })
     }
 
     pub fn to_payload(&self) -> Vec<u8> {
-        let mut buf: Vec<u8> = vec![0u8; 236 + self.options.len()];
-        buf[0] = self.op;
-        buf[1] = self.htype;
+        let opts = &self.options.build();
+
+        let mut buf: Vec<u8> = vec![0u8; 236 + opts.len()];
+        buf[0] = self.op as u8;
+        buf[1] = self.htype as u8;
         buf[2] = self.hlen;
         buf[3] = self.hops;
         buf[4..8].copy_from_slice(&self.xid.to_be_bytes());
@@ -179,7 +202,7 @@ impl DhcpMessage {
         buf[44..108].copy_from_slice(&self.sname);
         buf[108..236].copy_from_slice(&self.file);
 
-        buf[236..].copy_from_slice(&self.options);
+        buf[236..].copy_from_slice(opts);
 
         buf
     }
@@ -192,11 +215,12 @@ pub enum BootpOperation {
     Reply = 0x2,
 }
 
-pub struct DhcpOptionsBuilder {
+#[derive(Debug)]
+pub struct DhcpOptions {
     options: Vec<DhcpOption>,
 }
 
-impl DhcpOptionsBuilder {
+impl DhcpOptions {
     pub fn new() -> Self {
         Self {
             options: Vec::new(),
@@ -206,6 +230,10 @@ impl DhcpOptionsBuilder {
     pub fn message_type(mut self, t: DhcpMessageType) -> Self {
         self.options.push(DhcpOption::MessageType(t));
         self
+    }
+
+    pub fn find_from_tag(&self, tag: DhcpOptionKind) -> Option<&DhcpOption> {
+        self.options.iter().find(|opt| opt.kind() == tag)
     }
 
     pub fn hostname(mut self, name: impl Into<String>) -> Self {
@@ -242,7 +270,7 @@ impl DhcpOptionsBuilder {
         self
     }
 
-    pub fn build(self) -> Vec<u8> {
+    pub fn build(&self) -> Vec<u8> {
         let mut buf = Vec::new();
         buf.extend_from_slice(&0x63825363u32.to_be_bytes()); // magic cookie
         for opt in &self.options {
@@ -255,11 +283,38 @@ impl DhcpOptionsBuilder {
 
         buf
     }
+
+    pub fn parse(mut buf: &[u8]) -> Self {
+        let mut options: Vec<DhcpOption> = Vec::new();
+        buf = &buf[4..]; // skip magic cookie
+
+        while !buf.is_empty() {
+            match DhcpOption::decode(buf) {
+                Some((opt, consumed)) => {
+                    let done = matches!(opt, DhcpOption::End);
+
+                    buf = &buf[consumed..];
+                    options.push(opt);
+
+                    if done {
+                        break;
+                    }
+                }
+                None => break,
+            }
+        }
+
+        Self { options }
+    }
 }
 
 // See https://datatracker.ietf.org/doc/html/rfc2132#section-4
 // sections 4-9 for valid options. Not all ate modelled here.
+#[derive(Debug)]
 pub enum DhcpOption {
+    SubnetMask(Ipv4Addr), // FIXME: should this be an ipv4 addr?
+    Routers(Vec<Ipv4Addr>),
+    DomainNameServer(Vec<Ipv4Addr>),
     MessageType(DhcpMessageType),
     RequestedIp(Ipv4Addr),
     Hostname(String),
@@ -267,59 +322,145 @@ pub enum DhcpOption {
     LeaseTime(u32),
     ServerIdentifier(Ipv4Addr),
     ClientIdentifier { htype: HardwareType, data: Vec<u8> },
-    Raw(u8, Vec<u8>),
+    Raw { tag: u8, data: Vec<u8> },
     End,
 }
 
+#[derive(PartialEq, Eq, Debug, TryFromPrimitive)]
+#[repr(u8)]
+pub enum DhcpOptionKind {
+    SubnetMask = 1,
+    Routers = 3,
+    DomainNameServer = 6,
+    MessageType = 53,
+    RequestedIp = 50,
+    Hostname = 12,
+    ParameterRequestList = 55,
+    LeaseTime = 51,
+    ServerIdentifier = 54,
+    ClientIdentifier = 61,
+    End = 255,
+    Unknown = 0,
+}
+
 impl DhcpOption {
+    pub fn kind(&self) -> DhcpOptionKind {
+        match self {
+            DhcpOption::MessageType(_) => DhcpOptionKind::MessageType,
+            DhcpOption::RequestedIp(_) => DhcpOptionKind::RequestedIp,
+            DhcpOption::Hostname(_) => DhcpOptionKind::Hostname,
+            DhcpOption::ParameterRequestList(_) => DhcpOptionKind::ParameterRequestList,
+            DhcpOption::LeaseTime(_) => DhcpOptionKind::LeaseTime,
+            DhcpOption::ServerIdentifier(_) => DhcpOptionKind::ServerIdentifier,
+            DhcpOption::ClientIdentifier { .. } => DhcpOptionKind::ClientIdentifier,
+            DhcpOption::End => DhcpOptionKind::End,
+            DhcpOption::Raw { .. } => DhcpOptionKind::Unknown,
+            DhcpOption::SubnetMask(_) => DhcpOptionKind::SubnetMask,
+            DhcpOption::Routers(_) => DhcpOptionKind::Routers,
+            DhcpOption::DomainNameServer(_) => DhcpOptionKind::DomainNameServer,
+        }
+    }
+
+    fn write_tag(&self, buf: &mut Vec<u8>, data: &[u8]) {
+        buf.push(self.kind() as u8);
+        buf.push(data.len() as u8);
+        buf.extend_from_slice(data);
+    }
+
     pub fn encode(&self, buf: &mut Vec<u8>) {
         match self {
-            DhcpOption::MessageType(t) => {
-                buf.extend_from_slice(&[53, 1, *t as u8]);
+            DhcpOption::SubnetMask(mask) => self.write_tag(buf, &mask.octets()),
+            DhcpOption::DomainNameServer(ipv4_addrs) | DhcpOption::Routers(ipv4_addrs) => {
+                let addrs: Vec<u8> = ipv4_addrs.iter().flat_map(|ip| ip.octets()).collect();
+                self.write_tag(buf, &addrs);
             }
-            DhcpOption::RequestedIp(ip) => {
-                buf.push(50);
-                buf.push(4);
-                buf.extend_from_slice(&ip.octets());
-            }
-            DhcpOption::Hostname(name) => {
-                let bytes = name.as_bytes();
-                buf.push(12);
-                buf.push(bytes.len() as u8);
-                buf.extend_from_slice(bytes);
-            }
-            DhcpOption::ParameterRequestList(params) => {
-                buf.push(55);
-                buf.push(params.len() as u8);
-                buf.extend_from_slice(params);
-            }
-            DhcpOption::LeaseTime(secs) => {
-                buf.push(51);
-                buf.push(4);
-                buf.extend_from_slice(&secs.to_be_bytes());
-            }
-            DhcpOption::ServerIdentifier(ip) => {
-                buf.push(54);
-                buf.push(4);
-                buf.extend_from_slice(&ip.octets());
-            }
+            DhcpOption::MessageType(t) => self.write_tag(buf, &[*t as u8]),
+            DhcpOption::RequestedIp(ip) => self.write_tag(buf, &ip.octets()),
+            DhcpOption::Hostname(name) => self.write_tag(buf, name.as_bytes()),
+            DhcpOption::ParameterRequestList(params) => self.write_tag(buf, params),
+            DhcpOption::LeaseTime(secs) => self.write_tag(buf, &secs.to_be_bytes()),
+            DhcpOption::ServerIdentifier(ip) => self.write_tag(buf, &ip.octets()),
             DhcpOption::ClientIdentifier { htype, data } => {
-                buf.push(61);
+                buf.push(self.kind() as u8);
                 buf.push(1 + data.len() as u8);
                 buf.push(*htype as u8);
                 buf.extend_from_slice(data);
             }
-            DhcpOption::Raw(tag, data) => {
+            DhcpOption::Raw { tag, data } => {
                 buf.push(*tag);
                 buf.push(data.len() as u8);
                 buf.extend_from_slice(data);
             }
-            DhcpOption::End => buf.push(255),
+            DhcpOption::End => {
+                buf.push(0xFF);
+            }
         }
+    }
+
+    pub fn decode(buf: &[u8]) -> Option<(DhcpOption, usize)> {
+        let raw_tag = *buf.first()?;
+        let Ok(tag) = DhcpOptionKind::try_from_primitive(raw_tag) else {
+            println!("Received unknown DHCP tag {}!", raw_tag);
+            return None;
+        };
+
+        if tag == DhcpOptionKind::End {
+            return Some((DhcpOption::End, 1));
+        }
+
+        let len = *buf.get(1)? as usize;
+        let data = buf.get(2..2 + len)?;
+
+        let opt = match tag {
+            DhcpOptionKind::MessageType => {
+                DhcpOption::MessageType(DhcpMessageType::try_from(*data.first()?).ok()?)
+            }
+            DhcpOptionKind::RequestedIp => {
+                DhcpOption::RequestedIp(Ipv4Addr::new(data[0], data[1], data[2], data[3]))
+            }
+            DhcpOptionKind::Hostname => {
+                DhcpOption::Hostname(String::from_utf8(data.to_vec()).ok()?)
+            }
+            DhcpOptionKind::ParameterRequestList => DhcpOption::ParameterRequestList(data.to_vec()),
+            DhcpOptionKind::LeaseTime => {
+                DhcpOption::LeaseTime(u32::from_be_bytes(data.try_into().ok()?))
+            }
+            DhcpOptionKind::ServerIdentifier => {
+                DhcpOption::ServerIdentifier(Ipv4Addr::new(data[0], data[1], data[2], data[3]))
+            }
+            DhcpOptionKind::ClientIdentifier => DhcpOption::ClientIdentifier {
+                htype: HardwareType::try_from(data[0] as u16).ok()?,
+                data: data[1..].to_vec(),
+            },
+            DhcpOptionKind::SubnetMask => {
+                DhcpOption::SubnetMask(Ipv4Addr::new(data[0], data[1], data[2], data[3]))
+            }
+            DhcpOptionKind::Routers => {
+                let routers = data
+                    .chunks(4)
+                    .map(|chunk| Ipv4Addr::new(chunk[0], chunk[1], chunk[2], chunk[3]))
+                    .collect();
+
+                DhcpOption::Routers(routers)
+            }
+            DhcpOptionKind::DomainNameServer => {
+                let dn_servers = data
+                    .chunks(4)
+                    .map(|chunk| Ipv4Addr::new(chunk[0], chunk[1], chunk[2], chunk[3]))
+                    .collect();
+
+                DhcpOption::Routers(dn_servers)
+            }
+            DhcpOptionKind::End | DhcpOptionKind::Unknown => {
+                panic!("This should never occur!")
+            }
+        };
+
+        Some((opt, 2 + len))
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, TryFromPrimitive, PartialEq, Eq)]
 #[repr(u8)]
 pub enum DhcpMessageType {
     DhcpDiscover = 1,
