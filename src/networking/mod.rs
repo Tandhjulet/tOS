@@ -1,11 +1,11 @@
 pub mod drivers;
 pub mod protocols;
 
-use core::fmt::Display;
+use core::{fmt::Display, net::Ipv4Addr};
 
 use alloc::{boxed::Box, format, string::String, sync::Arc, vec};
 use num_enum::TryFromPrimitive;
-use spin::Mutex;
+use spin::{Mutex, RwLock};
 use x86_64::structures::idt::InterruptStackFrame;
 
 use crate::{
@@ -18,6 +18,29 @@ use crate::{
 };
 
 pub static NETWORK_DRIVER: Mutex<Option<Box<dyn NetworkDriver>>> = Mutex::new(None);
+pub static NETWORK_INFO: RwLock<NetworkInfo> = RwLock::new(NetworkInfo::new());
+
+pub struct NetworkInfo {
+    mac: Option<MacAddr>,
+    ip: Option<Ipv4Addr>,
+}
+
+impl NetworkInfo {
+    pub const fn new() -> Self {
+        Self {
+            mac: None,
+            ip: None,
+        }
+    }
+
+    pub fn mac(&self) -> &Option<MacAddr> {
+        &self.mac
+    }
+
+    pub fn ip(&self) -> &Option<Ipv4Addr> {
+        &self.ip
+    }
+}
 
 pub fn init() {
     let mut lock = {
@@ -45,7 +68,7 @@ pub fn init() {
     let driver = lock.as_mut().unwrap();
     driver.start();
 
-    println!("driver is up?: {}", driver.is_up());
+    NETWORK_INFO.write().mac = Some(*driver.get_mac_addr());
 }
 
 pub trait NetworkDriver: Send {
@@ -104,19 +127,20 @@ pub(self) fn send_packet(
     const FRAME_LEN: usize = EthernetFrame::header_len();
     let mut frame_buf = vec![0; FRAME_LEN + payload.len()];
 
-    let mut lock = NETWORK_DRIVER.lock();
-    let driver = lock.as_mut().unwrap();
-
     let frame = EthernetFrame {
         dst_mac,
-        src_mac: *driver.get_mac_addr(),
+        src_mac: NETWORK_INFO.read().mac().unwrap(),
         ethertype,
         payload,
     };
 
     let len = frame.write_into(&mut frame_buf)?;
 
-    driver.send_raw_data(&frame_buf[..len])?;
+    NETWORK_DRIVER
+        .lock()
+        .as_mut()
+        .unwrap()
+        .send_raw_data(&frame_buf[..len])?;
     Ok(())
 }
 

@@ -5,7 +5,9 @@ use futures_util::task::AtomicWaker;
 use num_enum::TryFromPrimitive;
 use spin::Mutex;
 
-use crate::networking::{self, EtherType, EthernetFrame, HardwareType, MacAddr, NETWORK_DRIVER};
+use crate::networking::{
+    self, EtherType, EthernetFrame, HardwareType, MacAddr, NETWORK_DRIVER, NETWORK_INFO,
+};
 
 static ARP_CACHE: Mutex<BTreeMap<Ipv4Addr, MacAddr>> = Mutex::new(BTreeMap::new());
 static PENDING_ARP: Mutex<BTreeMap<Ipv4Addr, Arc<AtomicWaker>>> = Mutex::new(BTreeMap::new());
@@ -21,11 +23,7 @@ impl Arp {
     }
 
     fn send_request(ip: &Ipv4Addr) -> Result<(), &'static str> {
-        let mac = {
-            let mut lock = NETWORK_DRIVER.lock();
-            let driver = lock.as_mut().unwrap();
-            *driver.get_mac_addr()
-        };
+        let mac = { NETWORK_INFO.read().mac().unwrap() };
 
         const ARP_LEN: usize = ArpMessage::len();
         let mut arp_buf = [0u8; ARP_LEN];

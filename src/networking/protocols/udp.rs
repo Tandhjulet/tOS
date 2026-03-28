@@ -3,6 +3,7 @@ use core::net::Ipv4Addr;
 use alloc::vec;
 use alloc::{format, string::String, vec::Vec};
 
+use crate::networking::protocols::dhcp::{DHCP, DHCP_CLIENT_PORT};
 use crate::{
     networking::protocols::ip::{IP, IPPacket, IPProtocol},
     println,
@@ -42,7 +43,9 @@ impl UDP {
         );
 
         // FIXME: abstract this dynamically
-        if message.dst_port == 68 {}
+        if message.dst_port == DHCP_CLIENT_PORT {
+            DHCP::handle_packet(message);
+        }
 
         Ok(())
     }
@@ -100,6 +103,10 @@ impl<'a> UdpMessage<'a> {
         buf[8..(self.length as usize)].copy_from_slice(&self.data);
 
         buf
+    }
+
+    pub fn data(&self) -> &[u8] {
+        self.data
     }
 
     // TODO: implement checksumming (it's optional in ipv4)

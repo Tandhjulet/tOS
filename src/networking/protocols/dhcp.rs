@@ -4,10 +4,12 @@ use alloc::vec;
 use alloc::{borrow::ToOwned, string::String, vec::Vec};
 use num_enum::TryFromPrimitive;
 
+use crate::networking::NETWORK_INFO;
 use crate::networking::{
     EtherType, HardwareType, MacAddr, NETWORK_DRIVER,
     protocols::udp::{UDP, UdpMessage},
 };
+use crate::println;
 
 pub const DHCP_SERVER_PORT: u16 = 67;
 pub const DHCP_CLIENT_PORT: u16 = 68;
@@ -17,7 +19,7 @@ pub struct DHCP {}
 
 impl DHCP {
     pub async fn discover() {
-        let mac = { *NETWORK_DRIVER.lock().as_ref().unwrap().get_mac_addr() };
+        let mac = { NETWORK_INFO.read().mac().unwrap() };
 
         let options = DhcpOptionsBuilder::new()
             .message_type(DhcpMessageType::DhcpDiscover)
@@ -49,10 +51,14 @@ impl DHCP {
 
     pub fn request(req_ip: Ipv4Addr) {}
 
-    pub fn handle_packet(packet: UdpMessage) {}
+    pub fn handle_packet(packet: UdpMessage) {
+        let message = DhcpMessage::from(packet.data());
+        println!("{:?}", message);
+    }
 }
 
 // see https://datatracker.ietf.org/doc/html/rfc2131
+#[derive(Debug)]
 pub struct DhcpMessage {
     op: u8,
     htype: u8,
@@ -103,6 +109,54 @@ impl DhcpMessage {
             sname,
             file: [0u8; 128],
             options,
+        }
+    }
+
+    pub fn from(payload: &[u8]) -> Self {
+        let op = payload[0];
+        let htype = payload[1];
+        let hlen = payload[2];
+        if hlen != 6 {
+            panic!("Don't support DHCP where CHADDR isnt a MAC!");
+        }
+
+        let hops = payload[3];
+
+        let xid = u32::from_be_bytes([payload[4], payload[5], payload[6], payload[7]]);
+        let secs = u16::from_be_bytes([payload[8], payload[9]]);
+        let flags = u16::from_be_bytes([payload[10], payload[11]]);
+
+        let ciaddr = Ipv4Addr::new(payload[12], payload[13], payload[14], payload[15]);
+        let yiaddr = Ipv4Addr::new(payload[16], payload[17], payload[18], payload[19]);
+        let siaddr = Ipv4Addr::new(payload[20], payload[21], payload[22], payload[23]);
+        let giaddr = Ipv4Addr::new(payload[24], payload[25], payload[26], payload[27]);
+
+        let chaddr = MacAddr::from_bytes(&payload[28..34]);
+
+        let mut sname = [0u8; 64];
+        sname.clone_from_slice(&payload[44..108]);
+
+        let mut file = [0u8; 128];
+        file.clone_from_slice(&payload[108..236]);
+
+        let opts = &payload[236..];
+
+        Self {
+            op,
+            htype,
+            hlen,
+            hops,
+            xid,
+            secs,
+            flags,
+            ciaddr,
+            yiaddr,
+            siaddr,
+            giaddr,
+            chaddr,
+            sname,
+            file,
+            options: opts.to_vec(),
         }
     }
 
