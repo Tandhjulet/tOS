@@ -8,7 +8,10 @@ use bootloader::{BootInfo, entry_point};
 use core::{net::Ipv4Addr, panic::PanicInfo};
 use tOS::{
     allocator, interrupts,
-    networking::{self, NETWORK_DRIVER, protocols::arp::Arp},
+    networking::{
+        self, NETWORK_DRIVER,
+        protocols::{arp::Arp, dhcp::DHCP},
+    },
     println,
     task::{Task, executor::Executor, keyboard},
 };
@@ -35,12 +38,7 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
 }
 
 async fn kernel_main_task() {
-    let ip = Ipv4Addr::new(192, 168, 100, 1);
-    // let ip = Ipv4Addr::new(255, 255, 255, 255);
-    let res = Arp::lookup(&ip).await.unwrap();
-
-    println!("{}", res);
-    println!("{}", NETWORK_DRIVER.lock().as_ref().unwrap().get_mac_addr())
+    DHCP::discover().await;
 }
 
 /// This function is called on panic.

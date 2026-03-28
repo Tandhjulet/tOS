@@ -5,7 +5,7 @@ use futures_util::task::AtomicWaker;
 use num_enum::TryFromPrimitive;
 use spin::Mutex;
 
-use crate::networking::{self, EtherType, EthernetFrame, MacAddr, NETWORK_DRIVER};
+use crate::networking::{self, EtherType, EthernetFrame, HardwareType, MacAddr, NETWORK_DRIVER};
 
 static ARP_CACHE: Mutex<BTreeMap<Ipv4Addr, MacAddr>> = Mutex::new(BTreeMap::new());
 static PENDING_ARP: Mutex<BTreeMap<Ipv4Addr, Arc<AtomicWaker>>> = Mutex::new(BTreeMap::new());
@@ -186,18 +186,6 @@ pub enum Operation {
 }
 
 impl Operation {
-    pub fn to_bytes(&self) -> [u8; 2] {
-        (*self as u16).to_be_bytes()
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-#[repr(u16)]
-pub enum HardwareType {
-    Ethernet = 0x1,
-}
-
-impl HardwareType {
     pub fn to_bytes(&self) -> [u8; 2] {
         (*self as u16).to_be_bytes()
     }

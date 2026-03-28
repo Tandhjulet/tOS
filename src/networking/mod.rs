@@ -147,6 +147,10 @@ impl MacAddr {
 
         Self { raw: bytes }
     }
+
+    pub fn octets(&self) -> [u8; 6] {
+        self.raw
+    }
 }
 
 impl Display for MacAddr {
@@ -166,6 +170,18 @@ impl Display for MacAddr {
 pub enum EtherType {
     IPv4 = 0x0800,
     ARP = 0x0806,
+}
+
+#[derive(Debug, Clone, Copy)]
+#[repr(u16)]
+pub enum HardwareType {
+    Ethernet = 0x1,
+}
+
+impl HardwareType {
+    pub fn to_bytes(&self) -> [u8; 2] {
+        (*self as u16).to_be_bytes()
+    }
 }
 
 pub const ETHERNET_HEADER_SIZE: usize = 6 + 6 + 2;

@@ -1,5 +1,6 @@
 use core::net::Ipv4Addr;
 
+use alloc::vec;
 use alloc::{format, string::String, vec::Vec};
 use num_enum::TryFromPrimitive;
 
@@ -91,9 +92,9 @@ impl<'a> IPPacket<'a> {
     pub fn to_payload(&self) -> Vec<u8> {
         let header_len = self.header.header_len();
 
-        let mut packet: Vec<u8> = Vec::with_capacity(header_len + self.data.len());
+        let mut packet: Vec<u8> = vec![0u8; header_len + self.data.len()];
         self.header.write_into(&mut packet[..header_len]);
-        packet.extend_from_slice(self.data);
+        packet[header_len..].copy_from_slice(self.data);
 
         packet
     }

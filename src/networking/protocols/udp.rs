@@ -1,5 +1,6 @@
 use core::net::Ipv4Addr;
 
+use alloc::vec;
 use alloc::{format, string::String, vec::Vec};
 
 use crate::{
@@ -13,8 +14,8 @@ impl UDP {
     pub async fn send_packet(
         src_ip: Ipv4Addr,
         dst_ip: Ipv4Addr,
-        dst_port: u16,
         src_port: u16,
+        dst_port: u16,
         data: &[u8],
     ) -> Result<(), String> {
         let message = UdpMessage::new(src_port, dst_port, data);
@@ -62,7 +63,7 @@ impl<'a> UdpMessage<'a> {
         UdpMessage {
             src_port,
             dst_port,
-            length: data.len() as u16,
+            length: (data.len() + UdpMessage::header_len()) as u16,
             checksum: 0,
             data,
         }
@@ -90,14 +91,13 @@ impl<'a> UdpMessage<'a> {
     }
 
     pub fn to_payload(&self) -> Vec<u8> {
-        let data_len = self.length as usize;
-        let mut buf: Vec<u8> = Vec::with_capacity(data_len + UdpMessage::header_len());
+        let mut buf: Vec<u8> = vec![0u8; self.length as usize];
 
         buf[0..2].copy_from_slice(&self.src_port.to_be_bytes());
         buf[2..4].copy_from_slice(&self.dst_port.to_be_bytes());
         buf[4..6].copy_from_slice(&self.length.to_be_bytes());
         buf[6..8].copy_from_slice(&self.checksum.to_be_bytes());
-        buf[8..data_len].copy_from_slice(&self.data);
+        buf[8..(self.length as usize)].copy_from_slice(&self.data);
 
         buf
     }
