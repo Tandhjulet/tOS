@@ -86,6 +86,12 @@ impl<'a> TcpMessage<'a> {
         }
     }
 
+    pub fn calculate_sum(&self) -> u32 {
+        let mut sum: u32 = 0;
+
+        sum
+    }
+
     pub fn calculate_checksum(&self) -> u16 {
         0xEF13
     }

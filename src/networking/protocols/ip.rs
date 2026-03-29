@@ -4,6 +4,7 @@ use alloc::vec;
 use alloc::{format, string::String, vec::Vec};
 use num_enum::TryFromPrimitive;
 
+use crate::helpers;
 use crate::networking::protocols::dhcp::EnsureDHCPLease;
 use crate::networking::{
     self, EtherType, EthernetFrame,
@@ -264,21 +265,13 @@ impl IPHeader {
         sum
     }
 
-    fn fold_sum(mut sum: u32) -> u16 {
-        while sum >> 16 != 0 {
-            sum = (sum & 0xFFFF) + (sum >> 16);
-        }
-
-        sum as u16
-    }
-
     pub fn calculate_send_checksum(&self) -> u16 {
-        let sum = IPHeader::fold_sum(self.calculate_sum(false));
+        let sum = helpers::fold_sum(self.calculate_sum(false));
         !sum
     }
 
     pub fn calculate_recv_checksum(&self) -> u16 {
-        let sum = IPHeader::fold_sum(self.calculate_sum(true));
+        let sum = helpers::fold_sum(self.calculate_sum(true));
         sum
     }
 }

@@ -7,3 +7,11 @@ pub const fn build_range<const N: usize>(start: u16, step: u16) -> [u16; N] {
     }
     arr
 }
+
+pub const fn fold_sum(mut sum: u32) -> u16 {
+    while sum >> 16 != 0 {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+
+    sum as u16
+}
