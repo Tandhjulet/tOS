@@ -17,13 +17,13 @@ Currently, both RX and TX for the network stack is pretty slow. I've attached so
 
 ### Transmission
 
-Speed is mostly slow here due to the fact that we're missing something like `sk_buff` from Linux. Instead, say we want to send a DHCP packet. Then, the DHCP layer allocates room for it's header and payload and writes it to that buffer. Then, it passes this buffer as the payload to the UDP layer, which does the same thing. When the packet finally reaches the NIC, it has been copied unnecessarily for each layer it goes through, which obviously slows down TX a lot.
+Speed is mostly slow here due to the fact that we're missing something like `sk_buff` from Linux. For example, say we want to send a DHCP packet: the DHCP layer allocates room for its header and payload and writes it to that buffer. Then, it passes this buffer onto the UDP layer as the payload. The UDP layer now allocates a new buffer with room for its own header and the payload (DHCP header + original payload) and writes to that. This cycle continues until the packet finally reaches the NIC, having been copied unnecessarily for every layer it passed through. This is obviously a major slowdown of transmission speed.
 
-> Solution: pass a linked list (or something alike) along instead. Every layer that the packet passes through attaches a node pointing to a buffer containing the layer's header to the head of the linked list. Then, when it reaches the NIC driver, it iterates through the linked list, copying every buffer directly into NIC's TX buffer,
+> Solution: pass a linked list (or something alike) along. Every layer that the packet passes through attaches a node pointing to a buffer containing the layer's header to the head of the linked list. Then, when it reaches the NIC driver, it iterates through the linked list, copying every buffer directly into NIC's TX buffer,
 
 ### Receive
 
-Receiving is not as bad as transmission, but it has flaws. For example, the driver doesn't copy the packet into the heap so it can prematurely mark it READ. Instead, it simply passes the buffer onto the network stack and then marks it done when the network stack is done processing it. This is obviously bad practise if a lot of operations has to be done on that packet. Furthermore, it processes them synchronously instead of offloading them to an asynchronous task. This means that if one packet takes a long time to process, the other packets will have to wait for it to be done before they can be processed.
+Receiving also has its flaws. For example, the driver doesn't copy the packet into the heap so it can prematurely mark it as read. Instead, it simply passes the buffer onto the network stack and then marks it read when the network stack is done processing it. This is obviously bad practise if a lot of operations has to be done on that packet. Furthermore, it processes them synchronously instead of offloading them to an asynchronous task. This means that if one packet takes a long time to process, the other packets will have to wait for it to be done before they can be processed themselves.
 
 > Solution is pretty simple: copy the packet into heap, mark it done, and pass the packet into an asynchronous packet processing queue.
 
