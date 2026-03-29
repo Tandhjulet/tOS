@@ -10,7 +10,7 @@ use crate::networking::{self, EtherType, EthernetFrame, HardwareType, MacAddr, N
 static ARP_CACHE: Mutex<BTreeMap<Ipv4Addr, MacAddr>> = Mutex::new(BTreeMap::new());
 static PENDING_ARP: Mutex<BTreeMap<Ipv4Addr, Arc<AtomicWaker>>> = Mutex::new(BTreeMap::new());
 
-pub struct Arp {}
+pub struct Arp;
 
 impl Arp {
     pub(in crate::networking) fn init() {

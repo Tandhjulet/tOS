@@ -9,7 +9,7 @@ use crate::{
     println,
 };
 
-pub struct UDP {}
+pub struct UDP;
 
 impl UDP {
     pub async fn send_packet(

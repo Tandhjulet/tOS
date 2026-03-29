@@ -9,9 +9,7 @@ use crate::networking::{
     protocols::{arp::Arp, udp::UDP},
 };
 
-pub struct IP {
-    _private: (),
-}
+pub struct IP;
 
 impl IP {
     // TODO: fragment big packets
