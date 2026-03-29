@@ -32,7 +32,7 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     interrupts::load_idt();
 
     let mut executor = Executor::new();
-    executor.spawn(Task::new(kernel_main_task()));
+    executor.spawn(Task::new(DHCP::dhcp_listener()));
     executor.spawn(Task::new(keyboard::print_keypresses()));
     executor.run();
 }

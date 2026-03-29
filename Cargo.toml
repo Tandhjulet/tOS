@@ -59,6 +59,8 @@ run-args = [
 	"-netdev",
 	# "tap,id=net0,ifname=tap0,script=no,downscript=no",
 	"user,id=net0",
+	"-object",
+	"filter-dump,id=f1,netdev=net0,file=/tmp/dhcp.pcap",
 	"-device",
 	"e1000,netdev=net0",
 	"-serial",

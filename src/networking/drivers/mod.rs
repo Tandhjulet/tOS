@@ -3,8 +3,7 @@ use core::ptr::read_volatile;
 use alloc::sync::Arc;
 use spin::Mutex;
 use x86_64::{
-    PhysAddr, VirtAddr, instructions::interrupts::without_interrupts,
-    structures::idt::InterruptStackFrame,
+    VirtAddr, instructions::interrupts::without_interrupts, structures::idt::InterruptStackFrame,
 };
 
 /**
@@ -16,7 +15,7 @@ use crate::{
     allocator::mmio::{self, alloc_dma_region},
     helpers,
     interrupts::{IDT, MIN_INTERRUPT, PICS},
-    networking::{self, MacAddr, NETWORK_DRIVER, NetworkDriver},
+    networking::{self, MacAddr, NetworkDriver},
     pci::{
         PciDevice,
         bar::{AnyBAR, BAR},
@@ -373,6 +372,34 @@ impl E1000 {
         };
     }
 
+    fn handle_receive(&mut self) {
+        loop {
+            let curr_idx = self.rx_cur as usize;
+            let desc =
+                unsafe { &mut *self.rx_descs_addr.as_mut_ptr::<E1000RxDesc>().add(curr_idx) };
+
+            if unsafe { read_volatile(&desc.status) } & TSTA_DD == 0 {
+                break;
+            }
+
+            let len = desc.length;
+            let packet = unsafe {
+                core::slice::from_raw_parts(self.get_desc_buffer_ptr(curr_idx), len as usize)
+            };
+
+            networking::handle_packet(packet);
+
+            desc.status = 0;
+
+            let old_cur = self.rx_cur;
+            self.rx_cur = (self.rx_cur + 1) % (E1000_NUM_RX_DESC as u16);
+
+            unsafe {
+                self.bar0.write_command(REG_RX_DESC_TAIL, old_cur as u32);
+            };
+        }
+    }
+
     pub fn tx_init(&mut self) {
         let (tx_virt, tx_phys) =
             alloc_dma_region((size_of::<E1000TxDesc>() * E1000_NUM_TX_DESC) as u64);
@@ -413,33 +440,6 @@ impl E1000 {
             // TODO: why?
             self.bar0.write_command(0x0410, 0x0060200A);
         };
-    }
-
-    fn handle_receive(&mut self) {
-        loop {
-            let curr_idx = self.rx_cur as usize;
-            let desc =
-                unsafe { &mut *self.rx_descs_addr.as_mut_ptr::<E1000RxDesc>().add(curr_idx) };
-
-            if unsafe { read_volatile(&desc.status) } & TSTA_DD == 0 {
-                break;
-            }
-
-            let len = desc.length;
-            let packet = unsafe {
-                core::slice::from_raw_parts(self.get_desc_buffer_ptr(curr_idx), len as usize)
-            };
-
-            networking::handle_packet(packet);
-
-            desc.status = 0;
-            self.rx_cur = (self.rx_cur + 1) % (E1000_NUM_RX_DESC as u16);
-
-            unsafe {
-                self.bar0
-                    .write_command(REG_RX_DESC_TAIL, self.rx_cur as u32)
-            };
-        }
     }
 }
 
@@ -508,6 +508,9 @@ impl NetworkDriver for E1000 {
         while unsafe { read_volatile(&desc.status) } == 0 {
             core::hint::spin_loop();
         }
+
+        self.handle_receive();
+
         Ok(())
     }
 

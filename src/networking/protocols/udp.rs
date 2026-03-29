@@ -37,14 +37,9 @@ impl UDP {
             ));
         }
 
-        println!(
-            "received message for port {} from port {}",
-            message.dst_port, message.src_port
-        );
-
         // FIXME: abstract this dynamically
         if message.dst_port == DHCP_CLIENT_PORT {
-            DHCP::handle_packet(message);
+            DHCP::handle_packet(message)?;
         }
 
         Ok(())

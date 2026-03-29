@@ -12,7 +12,7 @@ use crate::{
     interrupts::PICS,
     networking::{
         drivers::E1000,
-        protocols::{arp::Arp, ip::IP},
+        protocols::{arp::Arp, dhcp::DhcpLease, ip::IP},
     },
     println,
 };
@@ -22,14 +22,14 @@ pub static NETWORK_INFO: RwLock<NetworkInfo> = RwLock::new(NetworkInfo::new());
 
 pub struct NetworkInfo {
     mac: Option<MacAddr>,
-    ip: Option<Ipv4Addr>,
+    dhcp: Option<DhcpLease>,
 }
 
 impl NetworkInfo {
     pub const fn new() -> Self {
         Self {
             mac: None,
-            ip: None,
+            dhcp: None,
         }
     }
 
@@ -37,8 +37,15 @@ impl NetworkInfo {
         &self.mac
     }
 
-    pub fn ip(&self) -> &Option<Ipv4Addr> {
-        &self.ip
+    pub fn dhcp(&self) -> &Option<DhcpLease> {
+        &self.dhcp
+    }
+
+    pub fn ip(&self) -> Option<Ipv4Addr> {
+        let Some(dhcp) = &self.dhcp else {
+            return None;
+        };
+        Some(*dhcp.ip())
     }
 }
 

@@ -5,9 +5,7 @@ use futures_util::task::AtomicWaker;
 use num_enum::TryFromPrimitive;
 use spin::Mutex;
 
-use crate::networking::{
-    self, EtherType, EthernetFrame, HardwareType, MacAddr, NETWORK_DRIVER, NETWORK_INFO,
-};
+use crate::networking::{self, EtherType, EthernetFrame, HardwareType, MacAddr, NETWORK_INFO};
 
 static ARP_CACHE: Mutex<BTreeMap<Ipv4Addr, MacAddr>> = Mutex::new(BTreeMap::new());
 static PENDING_ARP: Mutex<BTreeMap<Ipv4Addr, Arc<AtomicWaker>>> = Mutex::new(BTreeMap::new());
@@ -115,13 +113,15 @@ impl ArpMessage {
     pub fn new(src_mac: MacAddr, to_discover: Ipv4Addr) -> Self {
         const DST_HW_ADDR: MacAddr = MacAddr::zero();
 
-        // hardcode IP until we get one
-        const SRC_IP: Ipv4Addr = Ipv4Addr::new(192, 168, 100, 2);
+        let src_ip = match NETWORK_INFO.read().dhcp() {
+            Some(lease) => *lease.ip(),
+            None => Ipv4Addr::new(0, 0, 0, 0),
+        };
 
         Self {
             operation: Operation::ArpRequest,
             src_hw_addr: src_mac,
-            src_pc_addr: SRC_IP,
+            src_pc_addr: src_ip,
             dst_hw_addr: DST_HW_ADDR,
             dst_pc_addr: to_discover,
         }
