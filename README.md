@@ -4,12 +4,28 @@ A very much work-in-progress OS & kernel for learning rust, x86-64 asm and C.
 
 the current road map is:
 
-- implement a network stack (WIP)
-    - impl. ARP, IP, ICMP/UDP/TCP (and perhaps SSL/TLS, HTTP(S))
+- network stack
+    - missing: TCP (and perhaps SSL/TLS, HTTP(S))
 - shell
 - file system
 - GUI
 - own bootloader (that works with UEFI)
+
+## Network Stack
+
+Currently, both RX and TX for the network stack is pretty slow. I've attached some points of improvement below, but it's unlikely they'll ever be implemented.
+
+### Transmission
+
+Speed is mostly slow here due to the fact that we're missing something like `sk_buff` from Linux. Instead, say we want to send a DHCP packet. Then, the DHCP layer allocates room for it's header and payload and writes it to that buffer. Then, it passes this buffer as the payload to the UDP layer, which does the same thing. When the packet finally reaches the NIC, it has been copied unnecessarily for each layer it goes through, which obviously slows down TX a lot.
+
+> Solution: pass a linked list (or something alike) along instead. Every layer that the packet passes through attaches a node pointing to a buffer containing the layer's header to the head of the linked list. Then, when it reaches the NIC driver, it iterates through the linked list, copying every buffer directly into NIC's TX buffer,
+
+### Receive
+
+Receiving is not as bad as transmission, but it has flaws. For example, the driver doesn't copy the packet into the heap so it can prematurely mark it READ. Instead, it simply passes the buffer onto the network stack and then marks it done when the network stack is done processing it. This is obviously bad practise if a lot of operations has to be done on that packet. Furthermore, it processes them synchronously instead of offloading them to an asynchronous task. This means that if one packet takes a long time to process, the other packets will have to wait for it to be done before they can be processed.
+
+> Solution is pretty simple: copy the packet into heap, mark it done, and pass the packet into an asynchronous packet processing queue.
 
 ## Environment
 
