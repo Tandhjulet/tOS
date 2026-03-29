@@ -9,8 +9,8 @@ use core::{net::Ipv4Addr, panic::PanicInfo};
 use tOS::{
     allocator, interrupts,
     networking::{
-        self, NETWORK_DRIVER,
-        protocols::{arp::Arp, dhcp::DHCP},
+        self,
+        protocols::{dhcp::DHCP, tcp::TcpConnection},
     },
     println,
     task::{Task, executor::Executor, keyboard},
@@ -33,12 +33,15 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
 
     let mut executor = Executor::new();
     executor.spawn(Task::new(DHCP::dhcp_listener()));
+    executor.spawn(Task::new(kernel_main_task()));
     executor.spawn(Task::new(keyboard::print_keypresses()));
     executor.run();
 }
 
 async fn kernel_main_task() {
-    DHCP::discover().await;
+    let dst = Ipv4Addr::new(0, 0, 0, 0);
+    let mut tcp = TcpConnection::new(dst, 1234, 1234);
+    tcp.open().await.unwrap();
 }
 
 /// This function is called on panic.

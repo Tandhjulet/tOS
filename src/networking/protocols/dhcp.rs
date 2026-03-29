@@ -6,13 +6,12 @@ use alloc::{format, vec};
 use num_enum::TryFromPrimitive;
 use spin::Mutex;
 
-use crate::networking::protocols::arp::Arp;
+use crate::networking::NETWORK_INFO;
 use crate::networking::{
     HardwareType, MacAddr,
     protocols::udp::{UDP, UdpMessage},
 };
-use crate::networking::{NETWORK_DRIVER, NETWORK_INFO, NetworkDriver};
-use crate::{print, println};
+use crate::println;
 
 pub const DHCP_SERVER_PORT: u16 = 67;
 pub const DHCP_CLIENT_PORT: u16 = 68;
