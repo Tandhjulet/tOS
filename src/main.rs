@@ -39,8 +39,8 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
 }
 
 async fn kernel_main_task() {
-    let dst = Ipv4Addr::new(0, 0, 0, 0);
-    let mut tcp = TcpConnection::new(dst, 1234, 1234);
+    let dst = Ipv4Addr::new(1, 1, 1, 1);
+    let mut tcp = TcpConnection::new(dst, 1234, 80);
     tcp.open().await.unwrap();
 }
 

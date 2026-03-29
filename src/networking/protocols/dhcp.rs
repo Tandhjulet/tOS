@@ -21,6 +21,8 @@ static CURRENT_OFFER: Mutex<Option<DhcpMessage>> = Mutex::new(None);
 static DHCP_WAKER: Mutex<Option<Waker>> = Mutex::new(None);
 static DHCP_EVENT: Mutex<Option<DhcpEvent>> = Mutex::new(None);
 
+static LEASE_WAKERS: Mutex<Vec<Waker>> = Mutex::new(Vec::new());
+
 pub struct DHCP;
 
 impl DHCP {
@@ -32,7 +34,7 @@ impl DHCP {
             .client_identifier(HardwareType::Ethernet, mac.octets().to_vec())
             .parameter_request_list([
                 DhcpOptionKind::SubnetMask,       // subnet mask
-                DhcpOptionKind::Routers,          // router
+                DhcpOptionKind::Router,           // router
                 DhcpOptionKind::DomainNameServer, // domain name server
             ]);
 
@@ -73,7 +75,7 @@ impl DHCP {
             .client_identifier(HardwareType::Ethernet, mac.octets().to_vec())
             .parameter_request_list([
                 DhcpOptionKind::SubnetMask,       // subnet mask
-                DhcpOptionKind::Routers,          // router
+                DhcpOptionKind::Router,           // router
                 DhcpOptionKind::DomainNameServer, // domain name server
             ])
             .server_identifier(siaddr)
@@ -174,18 +176,39 @@ impl DHCP {
                     DHCP::request().await;
                 }
                 DhcpEvent::Ack => {
-                    let (yiaddr, siaddr) = {
+                    {
                         let lock = CURRENT_OFFER.lock();
                         let dhcp = lock.as_ref().unwrap();
-                        (dhcp.yiaddr, dhcp.siaddr)
-                    };
 
-                    NETWORK_INFO.write().dhcp = Some(DhcpLease {
-                        ip: yiaddr,
-                        server: siaddr,
-                    });
+                        let subnet_mask =
+                            match dhcp.options.find_from_tag(DhcpOptionKind::SubnetMask) {
+                                Some(DhcpOption::SubnetMask(subnet_mask)) => *subnet_mask,
+                                _ => Ipv4Addr::new(0, 0, 0, 0),
+                            };
 
-                    println!("Got a DHCP lease for ip {}!", yiaddr);
+                        let gateway = match dhcp.options.find_from_tag(DhcpOptionKind::Router) {
+                            Some(DhcpOption::Router(routers)) => *routers.first().unwrap(),
+                            _ => Ipv4Addr::new(0, 0, 0, 0),
+                        };
+
+                        NETWORK_INFO.write().dhcp = Some(DhcpLease {
+                            ip: dhcp.yiaddr,
+                            server: dhcp.siaddr,
+                            gateway,
+                            client: dhcp.ciaddr,
+                            subnet_mask,
+                        });
+                    }
+
+                    let wakers = core::mem::take(&mut *LEASE_WAKERS.lock());
+                    for waker in wakers {
+                        waker.wake();
+                    }
+
+                    println!(
+                        "Got a DHCP lease for ip {}!",
+                        NETWORK_INFO.read().ip().unwrap()
+                    );
                 }
                 DhcpEvent::Nak => {
                     // TODO
@@ -200,6 +223,9 @@ impl DHCP {
 pub struct DhcpLease {
     ip: Ipv4Addr,
     server: Ipv4Addr,
+    gateway: Ipv4Addr,
+    client: Ipv4Addr,
+    subnet_mask: Ipv4Addr,
     // TODO: lease duration, etc.
 }
 
@@ -210,6 +236,41 @@ impl DhcpLease {
 
     pub fn server(&self) -> &Ipv4Addr {
         &self.server
+    }
+
+    pub fn gateway(&self) -> &Ipv4Addr {
+        &self.gateway
+    }
+
+    pub fn client(&self) -> &Ipv4Addr {
+        &self.client
+    }
+
+    pub fn subnet_mask(&self) -> &Ipv4Addr {
+        &self.subnet_mask
+    }
+}
+
+pub struct EnsureDHCPLease;
+
+impl Future for EnsureDHCPLease {
+    type Output = ();
+
+    fn poll(
+        self: core::pin::Pin<&mut Self>,
+        cx: &mut core::task::Context<'_>,
+    ) -> Poll<Self::Output> {
+        if let Some(_) = NETWORK_INFO.read().dhcp() {
+            return Poll::Ready(());
+        }
+
+        LEASE_WAKERS.lock().push(cx.waker().clone());
+
+        if let Some(_) = NETWORK_INFO.read().ip() {
+            Poll::Ready(())
+        } else {
+            Poll::Pending
+        }
     }
 }
 
@@ -489,7 +550,7 @@ impl DhcpOptions {
 #[derive(Debug)]
 pub enum DhcpOption {
     SubnetMask(Ipv4Addr), // FIXME: should this be an ipv4 addr?
-    Routers(Vec<Ipv4Addr>),
+    Router(Vec<Ipv4Addr>),
     DomainNameServer(Vec<Ipv4Addr>),
     MessageType(DhcpMessageType),
     RequestedIp(Ipv4Addr),
@@ -506,7 +567,7 @@ pub enum DhcpOption {
 #[repr(u8)]
 pub enum DhcpOptionKind {
     SubnetMask = 1,
-    Routers = 3,
+    Router = 3,
     DomainNameServer = 6,
     MessageType = 53,
     RequestedIp = 50,
@@ -532,7 +593,7 @@ impl DhcpOption {
             DhcpOption::End => DhcpOptionKind::End,
             DhcpOption::Raw { .. } => DhcpOptionKind::Unknown,
             DhcpOption::SubnetMask(_) => DhcpOptionKind::SubnetMask,
-            DhcpOption::Routers(_) => DhcpOptionKind::Routers,
+            DhcpOption::Router(_) => DhcpOptionKind::Router,
             DhcpOption::DomainNameServer(_) => DhcpOptionKind::DomainNameServer,
         }
     }
@@ -546,7 +607,7 @@ impl DhcpOption {
     pub fn encode(&self, buf: &mut Vec<u8>) {
         match self {
             DhcpOption::SubnetMask(mask) => self.write_tag(buf, &mask.octets()),
-            DhcpOption::DomainNameServer(ipv4_addrs) | DhcpOption::Routers(ipv4_addrs) => {
+            DhcpOption::DomainNameServer(ipv4_addrs) | DhcpOption::Router(ipv4_addrs) => {
                 let addrs: Vec<u8> = ipv4_addrs.iter().flat_map(|ip| ip.octets()).collect();
                 self.write_tag(buf, &addrs);
             }
@@ -621,13 +682,13 @@ impl DhcpOption {
             DhcpOptionKind::SubnetMask => {
                 DhcpOption::SubnetMask(Ipv4Addr::new(data[0], data[1], data[2], data[3]))
             }
-            DhcpOptionKind::Routers => {
+            DhcpOptionKind::Router => {
                 let routers = data
                     .chunks(4)
                     .map(|chunk| Ipv4Addr::new(chunk[0], chunk[1], chunk[2], chunk[3]))
                     .collect();
 
-                DhcpOption::Routers(routers)
+                DhcpOption::Router(routers)
             }
             DhcpOptionKind::DomainNameServer => {
                 let dn_servers = data
@@ -635,7 +696,7 @@ impl DhcpOption {
                     .map(|chunk| Ipv4Addr::new(chunk[0], chunk[1], chunk[2], chunk[3]))
                     .collect();
 
-                DhcpOption::Routers(dn_servers)
+                DhcpOption::Router(dn_servers)
             }
             DhcpOptionKind::End | DhcpOptionKind::Unknown => {
                 panic!("This should never occur!")

@@ -4,10 +4,12 @@ use alloc::vec;
 use alloc::{format, string::String, vec::Vec};
 use num_enum::TryFromPrimitive;
 
+use crate::networking::protocols::dhcp::EnsureDHCPLease;
 use crate::networking::{
     self, EtherType, EthernetFrame,
     protocols::{arp::Arp, udp::UDP},
 };
+use crate::networking::{MacAddr, NETWORK_INFO};
 
 pub struct IP;
 
@@ -21,12 +23,36 @@ impl IP {
     ) -> Result<(), String> {
         let packet = IPPacket::new(src, dst, protocol, data);
 
-        let mac = Arp::lookup(&dst)
-            .await
-            .ok_or(format!("failed to find addr {} via ARP", dst))?;
+        let mac = IP::get_route(dst).await?;
 
         networking::send_packet(mac, EtherType::IPv4, &packet.to_payload())?;
         Ok(())
+    }
+
+    pub async fn get_route(dst: Ipv4Addr) -> Result<MacAddr, String> {
+        if dst.is_broadcast() {
+            return Ok(MacAddr::broadcast());
+        }
+
+        EnsureDHCPLease.await;
+
+        let (use_gateway, gateway) = {
+            let lock = NETWORK_INFO.read();
+            let lease = lock.dhcp().as_ref().unwrap();
+
+            let ip = *lease.ip();
+            let subnet = *lease.subnet_mask();
+
+            let src_net = u32::from(ip) & u32::from(subnet);
+            let dst_net = u32::from(dst) & u32::from(subnet);
+            (src_net != dst_net, *lease.gateway())
+        };
+
+        let mac = Arp::lookup(if use_gateway { &gateway } else { &dst })
+            .await
+            .ok_or(format!("failed to find addr {} via ARP", dst))?;
+
+        Ok(mac)
     }
 
     // TODO: handle fragmentation
