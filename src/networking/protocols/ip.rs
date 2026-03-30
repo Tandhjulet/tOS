@@ -81,13 +81,11 @@ impl IP {
         match header.protocol {
             IPProtocol::TCP => {
                 let dst_port = u16::from_be_bytes([packet.data[2], packet.data[3]]);
-                println!("pre sockettable lock");
 
                 SOCKET_TABLE
                     .lock()
                     .deliver(dst_port, IPProtocol::TCP, Vec::from(packet.data));
 
-                println!("received tcp packet");
                 Ok(())
             }
 

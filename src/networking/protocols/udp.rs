@@ -4,10 +4,7 @@ use alloc::vec;
 use alloc::{format, string::String, vec::Vec};
 
 use crate::networking::protocols::dhcp::{DHCP, DHCP_CLIENT_PORT};
-use crate::{
-    networking::protocols::ip::{IP, IPPacket, IPProtocol},
-    println,
-};
+use crate::networking::protocols::ip::{IP, IPPacket, IPProtocol};
 
 pub struct UDP;
 

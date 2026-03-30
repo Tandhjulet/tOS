@@ -518,7 +518,7 @@ impl NetworkDriver for E1000 {
         status & 0x2 != 0
     }
 
-    fn handle_interrupt(&mut self, stack_frame: InterruptStackFrame) {
+    fn handle_interrupt(&mut self, _: InterruptStackFrame) {
         let status = unsafe { self.bar0.read_command(REG_I_READ) };
         if status & I_RXT0 > 0 {
             self.handle_receive();
