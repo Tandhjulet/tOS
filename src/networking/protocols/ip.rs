@@ -5,11 +5,9 @@ use alloc::{format, string::String, vec::Vec};
 use num_enum::TryFromPrimitive;
 
 use crate::networking::protocols::dhcp::EnsureDHCPLease;
+use crate::networking::protocols::ethernet::{EtherType, Ethernet, EthernetFrame};
 use crate::networking::protocols::socket::SOCKET_TABLE;
-use crate::networking::{
-    self, EtherType, EthernetFrame,
-    protocols::{arp::Arp, udp::UDP},
-};
+use crate::networking::protocols::{arp::Arp, udp::UDP};
 use crate::networking::{MacAddr, NETWORK_INFO};
 use crate::{helpers, println};
 
@@ -27,7 +25,7 @@ impl IP {
 
         let mac = IP::get_route(dst).await?;
 
-        networking::send_packet(mac, EtherType::IPv4, &packet.to_payload())?;
+        Ethernet::send_packet(mac, EtherType::IPv4, &packet.to_payload())?;
         Ok(())
     }
 

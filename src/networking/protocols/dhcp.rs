@@ -7,8 +7,9 @@ use num_enum::TryFromPrimitive;
 use spin::Mutex;
 
 use crate::networking::NETWORK_INFO;
+use crate::networking::protocols::ethernet::HardwareType;
 use crate::networking::{
-    HardwareType, MacAddr,
+    MacAddr,
     protocols::udp::{UDP, UdpMessage},
 };
 use crate::println;
