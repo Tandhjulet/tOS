@@ -44,6 +44,8 @@ async fn kernel_main_task() {
     let dst = Ipv4Addr::new(1, 1, 1, 1);
     let mut tcp = TcpConnection::new(dst, 1234, 80).await;
     tcp.open().await.unwrap();
+
+    tcp.close().await.unwrap();
 }
 
 /// This function is called on panic.

@@ -5,11 +5,11 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use alloc::{format, vec};
 
+use crate::helpers;
 use crate::networking::NETWORK_INFO;
 use crate::networking::protocols::dhcp::EnsureDHCPLease;
 use crate::networking::protocols::ip::{IP, IPProtocol};
 use crate::networking::protocols::socket::{RecvPacket, SOCKET_TABLE};
-use crate::{helpers, println};
 
 const TCPFLAG_CWR: u8 = 0b1000_0000;
 const TCPFLAG_ECE: u8 = 0b0100_0000;
@@ -77,11 +77,29 @@ impl TcpConnection {
         let data = self.recv_packet().await;
         let synack = TcpPacket::parse(&self, &data)?;
 
+        // TODO: cleanup
         self.state = TcpState::ESTABLISHED;
-        self.curr_ack_num = synack.seq_num;
+        self.curr_seq_num = self.curr_seq_num + 1;
+        self.curr_ack_num = synack.seq_num + 1;
 
         let ack = TcpPacket::new(&self, TCPFLAG_ACK, &[]);
         self.send_packet(&ack).await?;
+
+        self.curr_ack_num = ack.seq_num + 1;
+        self.curr_seq_num = self.curr_seq_num + 1;
+
+        Ok(())
+    }
+
+    pub async fn close(&mut self) -> Result<(), String> {
+        self.state = TcpState::FINWAIT1;
+        let fin = TcpPacket::new(&self, TCPFLAG_FIN, &[]);
+        self.send_packet(&fin).await?;
+
+        let data = self.recv_packet().await;
+        let ack = TcpPacket::parse(&self, &data)?;
+
+        self.state = TcpState::FINWAIT2;
 
         Ok(())
     }
