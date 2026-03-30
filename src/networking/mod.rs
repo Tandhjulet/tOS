@@ -1,9 +1,16 @@
 pub mod drivers;
 pub mod protocols;
 
-use core::{fmt::Display, net::Ipv4Addr};
+use core::{
+    fmt::Display,
+    net::Ipv4Addr,
+    task::{Poll, Waker},
+};
 
-use alloc::{boxed::Box, format, string::String, sync::Arc, vec};
+use alloc::vec;
+use alloc::{
+    boxed::Box, collections::vec_deque::VecDeque, format, string::String, sync::Arc, vec::Vec,
+};
 use num_enum::TryFromPrimitive;
 use spin::{Mutex, RwLock};
 use x86_64::structures::idt::InterruptStackFrame;
@@ -19,6 +26,12 @@ use crate::{
 
 pub static NETWORK_DRIVER: Mutex<Option<Box<dyn NetworkDriver>>> = Mutex::new(None);
 pub static NETWORK_INFO: RwLock<NetworkInfo> = RwLock::new(NetworkInfo::new());
+
+static TX_QUEUE: Mutex<VecDeque<Vec<u8>>> = Mutex::new(VecDeque::new());
+static TX_WAKER: Mutex<Option<Waker>> = Mutex::new(None);
+
+static RX_QUEUE: Mutex<VecDeque<Vec<u8>>> = Mutex::new(VecDeque::new());
+static RX_WAKER: Mutex<Option<Waker>> = Mutex::new(None);
 
 pub struct NetworkInfo {
     mac: Option<MacAddr>,
@@ -100,23 +113,54 @@ impl dyn NetworkDriver {
         unsafe {
             PICS.lock().notify_end_of_interrupt(irq_line);
         }
+
+        if let Some(waker) = RX_WAKER.lock().take() {
+            waker.wake();
+        }
     }
 }
 
-pub(self) fn handle_packet(raw: &[u8]) {
-    let packet = EthernetFrame::parse(raw);
-    if packet.is_err() {
-        return;
+// tx
+struct TxPacketFuture;
+
+impl Future for TxPacketFuture {
+    type Output = ();
+
+    fn poll(
+        self: core::pin::Pin<&mut Self>,
+        cx: &mut core::task::Context<'_>,
+    ) -> core::task::Poll<Self::Output> {
+        if !TX_QUEUE.lock().is_empty() {
+            return Poll::Ready(());
+        }
+
+        *TX_WAKER.lock() = Some(cx.waker().clone());
+
+        if !TX_QUEUE.lock().is_empty() {
+            Poll::Ready(())
+        } else {
+            Poll::Pending
+        }
     }
+}
 
-    let packet = packet.unwrap();
-    let res = match packet.ethertype {
-        EtherType::IPv4 => IP::handle_packet(packet),
-        EtherType::ARP => Arp::handle_packet(packet),
-    };
+fn queue_packet(data: Vec<u8>) {
+    TX_QUEUE.lock().push_back(data);
+    if let Some(waker) = TX_WAKER.lock().take() {
+        waker.wake();
+    }
+}
 
-    if let Err(msg) = res {
-        println!("NETWORK ERR: {}", msg);
+pub async fn network_tx_task() {
+    loop {
+        TxPacketFuture.await;
+        while let Some(data) = TX_QUEUE.lock().pop_front() {
+            let res = NETWORK_DRIVER.lock().as_mut().unwrap().send_raw_data(&data);
+
+            if let Err(msg) = res {
+                println!("NETWORK ERR: {}", msg);
+            }
+        }
     }
 }
 
@@ -141,16 +185,59 @@ pub(self) fn send_packet(
         payload,
     };
 
-    let len = frame.write_into(&mut frame_buf)?;
-
-    NETWORK_DRIVER
-        .lock()
-        .as_mut()
-        .unwrap()
-        .send_raw_data(&frame_buf[..len])?;
+    frame.write_into(&mut frame_buf)?;
+    queue_packet(frame_buf);
     Ok(())
 }
 
+// rx
+struct RxPacketFuture;
+
+impl Future for RxPacketFuture {
+    type Output = ();
+
+    fn poll(
+        self: core::pin::Pin<&mut Self>,
+        cx: &mut core::task::Context<'_>,
+    ) -> core::task::Poll<Self::Output> {
+        if !RX_QUEUE.lock().is_empty() {
+            return Poll::Ready(());
+        }
+
+        *RX_WAKER.lock() = Some(cx.waker().clone());
+
+        if !RX_QUEUE.lock().is_empty() {
+            Poll::Ready(())
+        } else {
+            Poll::Pending
+        }
+    }
+}
+
+pub async fn network_rx_task() {
+    loop {
+        RxPacketFuture.await;
+        while let Some(raw) = RX_QUEUE.lock().pop_front() {
+            println!("dequeued packet!");
+            let packet = EthernetFrame::parse(&raw);
+            if packet.is_err() {
+                return;
+            }
+
+            let packet = packet.unwrap();
+            let res = match packet.ethertype {
+                EtherType::IPv4 => IP::handle_packet(packet),
+                EtherType::ARP => Arp::handle_packet(packet),
+            };
+
+            if let Err(msg) = res {
+                println!("NETWORK ERR: {}", msg);
+            }
+        }
+    }
+}
+
+//
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MacAddr {
     raw: [u8; 6],

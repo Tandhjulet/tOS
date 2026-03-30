@@ -15,7 +15,7 @@ use crate::{
     allocator::mmio::{self, alloc_dma_region},
     helpers,
     interrupts::{IDT, MIN_INTERRUPT, PICS},
-    networking::{self, MacAddr, NetworkDriver},
+    networking::{self, MacAddr, NetworkDriver, RX_QUEUE, RX_WAKER},
     pci::{
         PciDevice,
         bar::{AnyBAR, BAR},
@@ -372,7 +372,8 @@ impl E1000 {
         };
     }
 
-    fn handle_receive(&mut self) {
+    fn handle_receive(&mut self) -> bool {
+        let mut received: bool = false;
         loop {
             let curr_idx = self.rx_cur as usize;
             let desc =
@@ -382,12 +383,14 @@ impl E1000 {
                 break;
             }
 
+            received = true;
+
             let len = desc.length;
             let packet = unsafe {
                 core::slice::from_raw_parts(self.get_desc_buffer_ptr(curr_idx), len as usize)
             };
 
-            networking::handle_packet(packet);
+            RX_QUEUE.lock().push_back(packet.to_vec());
 
             desc.status = 0;
 
@@ -398,6 +401,8 @@ impl E1000 {
                 self.bar0.write_command(REG_RX_DESC_TAIL, old_cur as u32);
             };
         }
+
+        received
     }
 
     pub fn tx_init(&mut self) {
@@ -505,11 +510,11 @@ impl NetworkDriver for E1000 {
                 .write_command(REG_TX_DESC_TAIL, self.tx_cur as u32)
         };
 
-        while unsafe { read_volatile(&desc.status) } == 0 {
-            core::hint::spin_loop();
+        if self.handle_receive() {
+            if let Some(waker) = RX_WAKER.lock().take() {
+                waker.wake();
+            }
         }
-
-        self.handle_receive();
 
         Ok(())
     }
@@ -523,6 +528,7 @@ impl NetworkDriver for E1000 {
         unsafe { self.bar0.write_command(REG_I_MASK, 0x1) };
 
         let status = unsafe { self.bar0.read_command(REG_I_READ) };
+        println!("interrupt status: {:#010b}", status);
         if status & I_RXT0 > 0 {
             self.handle_receive();
         }

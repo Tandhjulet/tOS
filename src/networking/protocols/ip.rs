@@ -4,13 +4,14 @@ use alloc::vec;
 use alloc::{format, string::String, vec::Vec};
 use num_enum::TryFromPrimitive;
 
-use crate::helpers;
 use crate::networking::protocols::dhcp::EnsureDHCPLease;
+use crate::networking::protocols::socket::SOCKET_TABLE;
 use crate::networking::{
     self, EtherType, EthernetFrame,
     protocols::{arp::Arp, udp::UDP},
 };
 use crate::networking::{MacAddr, NETWORK_INFO};
+use crate::{helpers, println};
 
 pub struct IP;
 
@@ -80,7 +81,19 @@ impl IP {
         }
 
         match header.protocol {
-            // IPProtocol::TCP => todo!(),
+            IPProtocol::TCP => {
+                let dst_port = u16::from_be_bytes([packet.data[2], packet.data[3]]);
+                println!("pre sockettable lock");
+
+                SOCKET_TABLE
+                    .lock()
+                    .deliver(dst_port, IPProtocol::TCP, Vec::from(packet.data));
+
+                println!("received tcp packet");
+                Ok(())
+            }
+
+            // FIXME: use socket table
             IPProtocol::UDP => UDP::handle_packet(packet),
             proto => Err(format!("unimplemented protocol: {:?}", proto)),
         }

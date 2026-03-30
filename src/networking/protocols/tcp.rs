@@ -5,10 +5,11 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::helpers;
 use crate::networking::NETWORK_INFO;
 use crate::networking::protocols::dhcp::EnsureDHCPLease;
 use crate::networking::protocols::ip::{IP, IPProtocol};
+use crate::networking::protocols::socket::{RecvPacket, SOCKET_TABLE};
+use crate::{helpers, println};
 
 const TCPFLAG_CWR: u8 = 0b1000_0000;
 const TCPFLAG_ECE: u8 = 0b0100_0000;
@@ -45,7 +46,17 @@ impl TcpConnection {
         }
     }
 
+    async fn recv_packet(&self) -> Vec<u8> {
+        RecvPacket {
+            port: self.src_port,
+            protocol: IPProtocol::TCP,
+        }
+        .await
+    }
+
     pub async fn open(&mut self) -> Result<(), String> {
+        SOCKET_TABLE.lock().bind(self.src_port, IPProtocol::TCP)?;
+
         if self.state != TcpState::CLOSED {
             return Err("Cannot open non-closed TCP conn!".to_owned());
         }
@@ -54,9 +65,13 @@ impl TcpConnection {
         self.seq_num = 0xdeadbeef;
         self.state = TcpState::SYNSENT;
 
-        let flags = TCPFLAG_SYN;
-        let message = TcpMessage::new(&self, flags, &[]);
-        self.send_packet(&message).await?;
+        let syn = TcpMessage::new(&self, TCPFLAG_SYN, &[]);
+        self.send_packet(&syn).await?;
+
+        println!("sent packet!");
+
+        let data = self.recv_packet().await;
+        println!("received syn_ack!");
         Ok(())
     }
 

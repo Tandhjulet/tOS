@@ -9,7 +9,7 @@ use core::{net::Ipv4Addr, panic::PanicInfo};
 use tOS::{
     allocator, interrupts,
     networking::{
-        self,
+        self, network_rx_task, network_tx_task,
         protocols::{dhcp::DHCP, tcp::TcpConnection},
     },
     println,
@@ -33,6 +33,8 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
 
     let mut executor = Executor::new();
     executor.spawn(Task::new(DHCP::dhcp_listener()));
+    executor.spawn(Task::new(network_rx_task()));
+    executor.spawn(Task::new(network_tx_task()));
     executor.spawn(Task::new(kernel_main_task()));
     executor.spawn(Task::new(keyboard::print_keypresses()));
     executor.run();
