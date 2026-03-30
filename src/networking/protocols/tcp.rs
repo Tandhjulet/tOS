@@ -5,6 +5,7 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
+use crate::helpers;
 use crate::networking::NETWORK_INFO;
 use crate::networking::protocols::dhcp::EnsureDHCPLease;
 use crate::networking::protocols::ip::{IP, IPProtocol};
@@ -74,6 +75,7 @@ pub struct TcpMessage<'a> {
     connection: &'a TcpConnection,
 
     flags: u8,
+    checksum: u16,
     data: &'a [u8],
 }
 
@@ -82,18 +84,63 @@ impl<'a> TcpMessage<'a> {
         Self {
             connection: conn,
             flags,
+            checksum: 0,
             data,
         }
     }
 
-    pub fn calculate_sum(&self) -> u32 {
+    pub fn calculate_sum(&self, include_checksum: bool) -> u32 {
+        let src = NETWORK_INFO.read().ip().unwrap();
         let mut sum: u32 = 0;
+
+        sum += u16::from_be_bytes([src.octets()[0], src.octets()[1]]) as u32;
+        sum += u16::from_be_bytes([src.octets()[2], src.octets()[3]]) as u32;
+
+        let dst_addr = self.connection.dst_ip;
+        sum += u16::from_be_bytes([dst_addr.octets()[0], dst_addr.octets()[1]]) as u32;
+        sum += u16::from_be_bytes([dst_addr.octets()[2], dst_addr.octets()[3]]) as u32;
+
+        sum += 0; // zeros
+        sum += IPProtocol::TCP as u32;
+        let tcp_len = (self.data_offset() as usize * 4) + self.data.len();
+        sum += tcp_len as u32;
+
+        sum += self.connection.src_port as u32;
+        sum += self.connection.dst_port as u32;
+
+        sum += (self.connection.seq_num >> 16) as u32;
+        sum += (self.connection.seq_num & 0xFFFF) as u32;
+        sum += (self.connection.ack_num >> 16) as u32;
+        sum += (self.connection.ack_num & 0xFFFF) as u32;
+
+        sum += ((self.data_offset() as u32) << 12) | self.flags as u32;
+        sum += 0x0FFF; // window size
+
+        if include_checksum {
+            sum += self.checksum as u32;
+        }
+        sum += 0; // urgent ptr
+
+        for chunk in self.data.chunks(2) {
+            let word = if chunk.len() == 2 {
+                u16::from_be_bytes([chunk[0], chunk[1]])
+            } else {
+                u16::from_be_bytes([chunk[0], 0])
+            };
+            sum += word as u32;
+        }
 
         sum
     }
 
-    pub fn calculate_checksum(&self) -> u16 {
-        0xEF13
+    pub fn calculate_send_checksum(&self) -> u16 {
+        let sum = helpers::fold_sum(self.calculate_sum(false));
+        !sum
+    }
+
+    pub fn calculate_recv_checksum(&self) -> u16 {
+        let sum = helpers::fold_sum(self.calculate_sum(true));
+        sum
     }
 
     pub fn data_offset(&self) -> u8 {
@@ -116,7 +163,7 @@ impl<'a> TcpMessage<'a> {
         // FIXME: dont hardcode
         let window_size: u16 = 0x0FFF;
         buffer[14..16].copy_from_slice(&window_size.to_be_bytes());
-        buffer[16..18].copy_from_slice(&self.calculate_checksum().to_be_bytes());
+        buffer[16..18].copy_from_slice(&self.calculate_send_checksum().to_be_bytes());
         // TODO: implement urgent ptrs
         buffer[18..20].copy_from_slice(&[0u8, 0u8]);
 
