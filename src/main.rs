@@ -35,7 +35,7 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     executor.spawn(Task::new(DHCP::dhcp_listener()));
     executor.spawn(Task::new(network_rx_task()));
     executor.spawn(Task::new(network_tx_task()));
-    executor.spawn(Task::new(kernel_main_task()));
+    // executor.spawn(Task::new(kernel_main_task()));
     executor.spawn(Task::new(keyboard::print_keypresses()));
     executor.run();
 }

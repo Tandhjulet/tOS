@@ -325,6 +325,39 @@ impl E1000 {
         (buffers_start_addr + (buffer_idx * RX_BUFFER_SIZE) as u64) as *const _
     }
 
+    fn handle_receive(&mut self) -> bool {
+        let mut received: bool = false;
+        loop {
+            let curr_idx = self.rx_cur as usize;
+            let desc =
+                unsafe { &mut *self.rx_descs_addr.as_mut_ptr::<E1000RxDesc>().add(curr_idx) };
+
+            if unsafe { read_volatile(&desc.status) } & TSTA_DD == 0 {
+                break;
+            }
+
+            received = true;
+
+            let len = desc.length;
+            let packet = unsafe {
+                core::slice::from_raw_parts(self.get_desc_buffer_ptr(curr_idx), len as usize)
+            };
+
+            RX_QUEUE.lock().push_back(packet.to_vec());
+
+            desc.status = 0;
+
+            let old_cur = self.rx_cur;
+            self.rx_cur = (self.rx_cur + 1) % (E1000_NUM_RX_DESC as u16);
+
+            unsafe {
+                self.bar0.write_command(REG_RX_DESC_TAIL, old_cur as u32);
+            };
+        }
+
+        received
+    }
+
     pub fn rx_init(&mut self) {
         const BLOCK_SIZE: usize = size_of::<E1000RxDesc>() * E1000_NUM_RX_DESC;
         const TOTAL_SIZE: u64 = (BLOCK_SIZE + RX_BUFFER_SIZE * E1000_NUM_RX_DESC) as u64;
@@ -370,39 +403,6 @@ impl E1000 {
 
             self.bar0.write_command(REG_R_CTRL, flags);
         };
-    }
-
-    fn handle_receive(&mut self) -> bool {
-        let mut received: bool = false;
-        loop {
-            let curr_idx = self.rx_cur as usize;
-            let desc =
-                unsafe { &mut *self.rx_descs_addr.as_mut_ptr::<E1000RxDesc>().add(curr_idx) };
-
-            if unsafe { read_volatile(&desc.status) } & TSTA_DD == 0 {
-                break;
-            }
-
-            received = true;
-
-            let len = desc.length;
-            let packet = unsafe {
-                core::slice::from_raw_parts(self.get_desc_buffer_ptr(curr_idx), len as usize)
-            };
-
-            RX_QUEUE.lock().push_back(packet.to_vec());
-
-            desc.status = 0;
-
-            let old_cur = self.rx_cur;
-            self.rx_cur = (self.rx_cur + 1) % (E1000_NUM_RX_DESC as u16);
-
-            unsafe {
-                self.bar0.write_command(REG_RX_DESC_TAIL, old_cur as u32);
-            };
-        }
-
-        received
     }
 
     pub fn tx_init(&mut self) {
@@ -484,7 +484,7 @@ impl NetworkDriver for E1000 {
         &self.mac
     }
 
-    fn send_raw_data(&mut self, data: &[u8]) -> Result<(), &'static str> {
+    fn prepare_transmit(&mut self, data: &[u8]) {
         // TODO: don't realloc to ensure DMA - use pre-alloc buffers for performance
         let (tx_buf_virt, tx_buf_phys) = alloc_dma_region(data.len() as u64);
         unsafe {
@@ -504,19 +504,13 @@ impl NetworkDriver for E1000 {
         desc.status = 0x0;
 
         self.tx_cur = (self.tx_cur + 1) % (E1000_NUM_TX_DESC as u16);
+    }
 
+    fn transmit(&mut self) {
         unsafe {
             self.bar0
                 .write_command(REG_TX_DESC_TAIL, self.tx_cur as u32)
         };
-
-        if self.handle_receive() {
-            if let Some(waker) = RX_WAKER.lock().take() {
-                waker.wake();
-            }
-        }
-
-        Ok(())
     }
 
     fn is_up(&mut self) -> bool {
@@ -525,13 +519,13 @@ impl NetworkDriver for E1000 {
     }
 
     fn handle_interrupt(&mut self, stack_frame: InterruptStackFrame) {
-        unsafe { self.bar0.write_command(REG_I_MASK, 0x1) };
-
         let status = unsafe { self.bar0.read_command(REG_I_READ) };
-        println!("interrupt status: {:#010b}", status);
         if status & I_RXT0 > 0 {
             self.handle_receive();
         }
+
+        let imask = I_RX0 | I_LSC | I_RXT0;
+        unsafe { self.bar0.write_command(REG_I_MASK, imask) };
     }
 
     fn get_interrupt_line(&self) -> u8 {

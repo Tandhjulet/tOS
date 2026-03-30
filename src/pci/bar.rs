@@ -2,9 +2,12 @@ use core::ptr::{read_volatile, write_volatile};
 
 use alloc::sync::Arc;
 use spin::Mutex;
-use x86_64::{PhysAddr, VirtAddr, instructions::port::Port};
+use x86_64::{
+    PhysAddr, VirtAddr,
+    instructions::{interrupts::without_interrupts, port::Port},
+};
 
-use crate::pci::PciDevice;
+use crate::{pci::PciDevice, println};
 
 pub enum AnyBAR {
     IO(IOBar),
@@ -159,7 +162,10 @@ impl BAR for MemBar {
 
         let addr = self.virt_addr.as_u64() + (offset as u64);
         let ptr = addr as *mut u32;
-        unsafe { write_volatile(ptr, val) };
+
+        without_interrupts(|| {
+            unsafe { write_volatile(ptr, val) };
+        });
     }
 
     unsafe fn read_command(&mut self, offset: u16) -> u32 {

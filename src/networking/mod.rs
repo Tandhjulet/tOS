@@ -1,22 +1,19 @@
 pub mod drivers;
 pub mod protocols;
 
-use core::{
-    fmt::Display,
-    net::Ipv4Addr,
-    task::{Poll, Waker},
-};
+use core::{fmt::Display, net::Ipv4Addr, task::Poll};
 
 use alloc::vec;
 use alloc::{
     boxed::Box, collections::vec_deque::VecDeque, format, string::String, sync::Arc, vec::Vec,
 };
+use futures_util::task::AtomicWaker;
 use num_enum::TryFromPrimitive;
 use spin::{Mutex, RwLock};
-use x86_64::structures::idt::InterruptStackFrame;
+use x86_64::{instructions::interrupts::without_interrupts, structures::idt::InterruptStackFrame};
 
 use crate::{
-    interrupts::PICS,
+    interrupts::{MIN_INTERRUPT, PICS},
     networking::{
         drivers::E1000,
         protocols::{arp::Arp, dhcp::DhcpLease, ip::IP},
@@ -28,10 +25,10 @@ pub static NETWORK_DRIVER: Mutex<Option<Box<dyn NetworkDriver>>> = Mutex::new(No
 pub static NETWORK_INFO: RwLock<NetworkInfo> = RwLock::new(NetworkInfo::new());
 
 static TX_QUEUE: Mutex<VecDeque<Vec<u8>>> = Mutex::new(VecDeque::new());
-static TX_WAKER: Mutex<Option<Waker>> = Mutex::new(None);
+static TX_WAKER: AtomicWaker = AtomicWaker::new();
 
 static RX_QUEUE: Mutex<VecDeque<Vec<u8>>> = Mutex::new(VecDeque::new());
-static RX_WAKER: Mutex<Option<Waker>> = Mutex::new(None);
+static RX_WAKER: AtomicWaker = AtomicWaker::new();
 
 pub struct NetworkInfo {
     mac: Option<MacAddr>,
@@ -95,7 +92,8 @@ pub trait NetworkDriver: Send {
     fn start(&mut self);
     fn get_mac_addr(&self) -> &MacAddr;
     fn is_up(&mut self) -> bool;
-    fn send_raw_data(&mut self, data: &[u8]) -> Result<(), &'static str>;
+    fn prepare_transmit(&mut self, data: &[u8]);
+    fn transmit(&mut self);
     fn handle_interrupt(&mut self, stack_frame: InterruptStackFrame);
     fn get_interrupt_line(&self) -> u8;
 }
@@ -111,12 +109,25 @@ impl dyn NetworkDriver {
         };
 
         unsafe {
-            PICS.lock().notify_end_of_interrupt(irq_line);
+            let remapped_line = irq_line + (MIN_INTERRUPT as u8);
+            PICS.lock().notify_end_of_interrupt(remapped_line);
         }
 
-        if let Some(waker) = RX_WAKER.lock().take() {
-            waker.wake();
+        RX_WAKER.wake();
+    }
+
+    pub fn send_packet(data: Vec<u8>) {
+        {
+            NETWORK_DRIVER
+                .lock()
+                .as_mut()
+                .unwrap()
+                .prepare_transmit(&data);
         }
+
+        without_interrupts(|| {
+            NETWORK_DRIVER.lock().as_mut().unwrap().transmit();
+        })
     }
 }
 
@@ -130,11 +141,7 @@ impl Future for TxPacketFuture {
         self: core::pin::Pin<&mut Self>,
         cx: &mut core::task::Context<'_>,
     ) -> core::task::Poll<Self::Output> {
-        if !TX_QUEUE.lock().is_empty() {
-            return Poll::Ready(());
-        }
-
-        *TX_WAKER.lock() = Some(cx.waker().clone());
+        TX_WAKER.register(cx.waker());
 
         if !TX_QUEUE.lock().is_empty() {
             Poll::Ready(())
@@ -146,20 +153,21 @@ impl Future for TxPacketFuture {
 
 fn queue_packet(data: Vec<u8>) {
     TX_QUEUE.lock().push_back(data);
-    if let Some(waker) = TX_WAKER.lock().take() {
-        waker.wake();
-    }
+    TX_WAKER.wake();
 }
 
 pub async fn network_tx_task() {
     loop {
         TxPacketFuture.await;
-        while let Some(data) = TX_QUEUE.lock().pop_front() {
-            let res = NETWORK_DRIVER.lock().as_mut().unwrap().send_raw_data(&data);
+        loop {
+            let data = {
+                let Some(data) = TX_QUEUE.lock().pop_front() else {
+                    break;
+                };
+                data
+            };
 
-            if let Err(msg) = res {
-                println!("NETWORK ERR: {}", msg);
-            }
+            <dyn NetworkDriver>::send_packet(data);
         }
     }
 }
@@ -200,11 +208,7 @@ impl Future for RxPacketFuture {
         self: core::pin::Pin<&mut Self>,
         cx: &mut core::task::Context<'_>,
     ) -> core::task::Poll<Self::Output> {
-        if !RX_QUEUE.lock().is_empty() {
-            return Poll::Ready(());
-        }
-
-        *RX_WAKER.lock() = Some(cx.waker().clone());
+        RX_WAKER.register(cx.waker());
 
         if !RX_QUEUE.lock().is_empty() {
             Poll::Ready(())
@@ -217,10 +221,17 @@ impl Future for RxPacketFuture {
 pub async fn network_rx_task() {
     loop {
         RxPacketFuture.await;
-        while let Some(raw) = RX_QUEUE.lock().pop_front() {
-            println!("dequeued packet!");
+        loop {
+            let raw = {
+                let Some(raw) = RX_QUEUE.lock().pop_front() else {
+                    break;
+                };
+                raw
+            };
+
             let packet = EthernetFrame::parse(&raw);
             if packet.is_err() {
+                println!("NETWORK ERR: failed to parse ethernet frame!");
                 return;
             }
 
