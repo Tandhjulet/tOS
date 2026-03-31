@@ -86,7 +86,7 @@ impl TcpConnection {
 
     pub async fn close(&mut self) -> Result<(), String> {
         self.state = TcpState::FINWAIT1;
-        self.send(TCPFLAG_ACK, &[]).await?;
+        self.send(TCPFLAG_FIN | TCPFLAG_ACK, &[]).await?;
 
         let ack = self.recv_ack().await?;
         if ack.flags() != TCPFLAG_ACK {
