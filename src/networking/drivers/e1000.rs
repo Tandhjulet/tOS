@@ -8,12 +8,11 @@ use x86_64::{
 
 /**
  * See https://www.intel.com/content/dam/doc/manual/pci-pci-x-family-gbe-controllers-software-dev-manual.pdf#page389
- * or (https://wiki.osdev.org/Intel_Ethernet_i217) for documentation
- * details regarding the implementation of the E1000 driver.
- */
+	* or (https://wiki.osdev.org/Intel_Ethernet_i217) for documentation
+	* details regarding the implementation of the E1000 driver.
+	*/
 use crate::{
     allocator::mmio::{self, alloc_dma_region},
-    helpers,
     interrupts::{IDT, MIN_INTERRUPT, PICS},
     networking::{MacAddr, RX_QUEUE, drivers::NetworkDriver},
     pci::{
@@ -23,102 +22,117 @@ use crate::{
     println,
 };
 
-const E1000_NUM_RX_DESC: usize = 32;
-const E1000_NUM_TX_DESC: usize = 8;
+#[allow(unused)]
+pub(super) mod cfg {
+    use crate::helpers;
 
-// Refer to Table 13-2 in https://www.intel.com/content/dam/doc/manual/pci-pci-x-family-gbe-controllers-software-dev-manual.pdf#page389
-// for documentation about these constants
-const REG_CTRL: u16 = 0x0; // Device Control
-const REG_STATUS: u16 = 0x0008; // Device Status
-const REG_TXCW: u16 = 0x0178; // Transmit Configuration
-const REG_EEPROM: u16 = 0x0014; // EEPROM Read
+    // Refer to Table 13-2 in https://www.intel.com/content/dam/doc/manual/pci-pci-x-family-gbe-controllers-software-dev-manual.pdf#page389
+    // for documentation about these constants
+    pub const CTRL: u16 = 0x0; // Device Control
+    pub const STATUS: u16 = 0x0008; // Device Status
+    pub const TXCW: u16 = 0x0178; // Transmit Configuration
+    pub const EEPROM: u16 = 0x0014; // EEPROM Read
 
-// RX/TX
-const REG_R_CTRL: u16 = 0x0100; // Receive Control
-const REG_RX_DESC_LO: u16 = 0x2800; // Receive Descriptor Base Low
-const REG_RX_DESC_HI: u16 = 0x2804; // Receive Descriptor Base High
+    pub const NUM_RX_DESC: usize = 32;
+    pub const NUM_TX_DESC: usize = 8;
 
-const REG_RX_DESC_LEN: u16 = 0x2808;
-const REG_RX_DESC_HEAD: u16 = 0x2810;
-const REG_RX_DESC_TAIL: u16 = 0x2818;
+    pub mod rx {
+        pub const CTRL: u16 = 0x0100; // Receive Control
 
-const REG_T_CTRL: u16 = 0x0400; // Transmit Control
-const REG_TX_DESC_LO: u16 = 0x3800; // Transmit Descriptor Base Low
-const REG_TX_DESC_HI: u16 = 0x3804; // Transmit Descriptor Base High
+        pub const DESC_LO: u16 = 0x2800; // Receive Descriptor Base Low
+        pub const DESC_HI: u16 = 0x2804; // Receive Descriptor Base High
 
-const REG_TX_DESC_LEN: u16 = 0x3808;
-const REG_TX_DESC_HEAD: u16 = 0x3810;
-const REG_TX_DESC_TAIL: u16 = 0x3818;
+        pub const DESC_LEN: u16 = 0x2808;
+        pub const DESC_HEAD: u16 = 0x2810;
+        pub const DESC_TAIL: u16 = 0x2818;
 
-//
-// REG_R_CTRL (Receive Control) FLAGS (see 13.4.22 intel docs)
-//
-const RCTL_EN: u32 = 1 << 1; // Enable Receiver
-const RCTL_SBP: u32 = 1 << 2; // Store Bad Packets
-const RCTL_UPE: u32 = 1 << 3; // Unicast Promiscuous Enabled
-const RCTL_MPE: u32 = 1 << 4; // Multicast Promiscuous Enabled
-const RCTL_LPE: u32 = 1 << 5; // Long Packet Reception Enable
-// Loopback Mode
-const RCTL_LBM_NONE: u32 = 0 << 6; // No Loopback
-const RCTL_LBM_PHY: u32 = 0b11 << 6; // PHY or external SerDesc loopback
-// Receive Descriptor Minimum Threshold Size
-const RCTL_RDMTS_HALF: u32 = 0 << 8; // Threshold is 1/2 of total RX circular desc buffer
-const RCTL_RDMTS_QUARTER: u32 = 1 << 8; // Threshold is 1/4 of total RX circular desc buffer
-const RCTL_RDMTS_EIGHT: u32 = 2 << 8; // Threshold is 1/8 of total RX circular desc buffer
-// Multicast Offset
-const RCTL_MO_36: u32 = 0 << 12; // Use bits 47:36
-const RCTL_MO_35: u32 = 1 << 12; // Use bits 47:35
-const RCTL_MO_34: u32 = 2 << 12; // Use bits 47:34
-const RCTL_MO_32: u32 = 3 << 12; // Use bits 47:32
-const RCTL_BAM: u32 = 1 << 15; // Broadcast Accept Mode
-// Buffer sizes
-const RCTL_BSIZE_256: u32 = 3 << 16;
-const RCTL_BSIZE_512: u32 = 2 << 16;
-const RCTL_BSIZE_1024: u32 = 1 << 16;
-const RCTL_BSIZE_2048: u32 = 0 << 16;
-const RCTL_BSIZE_4096: u32 = (3 << 16) | (1 << 25);
-const RCTL_BSIZE_8192: u32 = (2 << 16) | (1 << 25);
-const RCTL_BSIZE_16384: u32 = (1 << 16) | (1 << 25);
-const RCTL_VFE: u32 = 1 << 18; // VLAN Filter Enable
-const RCTL_CFIEN: u32 = 1 << 19; // Canonical Form Indicator Enable
-const RCTL_CFI: u32 = 1 << 20; // Canonical Form Indicator Bit Value
-const RCTL_DPF: u32 = 1 << 22; // Discard Pause Frames
-const RCTL_PMCF: u32 = 1 << 23; // Pass MAC Control Frames
-const RCTL_SECRC: u32 = 1 << 26; // Strip Ethernet CRC
+        pub mod ctrl {
+            //
+            // REG_R_CTRL (Receive Control) FLAGS (see 13.4.22 intel docs)
+            //
+            pub const EN: u32 = 1 << 1; // Enable Receiver
+            pub const SBP: u32 = 1 << 2; // Store Bad Packets
+            pub const UPE: u32 = 1 << 3; // Unicast Promiscuous Enabled
+            pub const MPE: u32 = 1 << 4; // Multicast Promiscuous Enabled
+            pub const LPE: u32 = 1 << 5; // Long Packet Reception Enable
+            // Loopback Mode
+            pub const LBM_NONE: u32 = 0 << 6; // No Loopback
+            pub const LBM_PHY: u32 = 0b11 << 6; // PHY or external SerDesc loopback
+            // Receive Descriptor Minimum Threshold Size
+            pub const RDMTS_HALF: u32 = 0 << 8; // Threshold is 1/2 of total RX circular desc buffer
+            pub const RDMTS_QUARTER: u32 = 1 << 8; // Threshold is 1/4 of total RX circular desc buffer
+            pub const RDMTS_EIGHT: u32 = 2 << 8; // Threshold is 1/8 of total RX circular desc buffer
+            // Multicast Offset
+            pub const MO_36: u32 = 0 << 12; // Use bits 47:36
+            pub const MO_35: u32 = 1 << 12; // Use bits 47:35
+            pub const MO_34: u32 = 2 << 12; // Use bits 47:34
+            pub const MO_32: u32 = 3 << 12; // Use bits 47:32
+            pub const BAM: u32 = 1 << 15; // Broadcast Accept Mode
+            // Buffer sizes
+            pub const BSIZE_256: u32 = 3 << 16;
+            pub const BSIZE_512: u32 = 2 << 16;
+            pub const BSIZE_1024: u32 = 1 << 16;
+            pub const BSIZE_2048: u32 = 0 << 16;
+            pub const BSIZE_4096: u32 = (3 << 16) | (1 << 25);
+            pub const BSIZE_8192: u32 = (2 << 16) | (1 << 25);
+            pub const BSIZE_16384: u32 = (1 << 16) | (1 << 25);
+            pub const VFE: u32 = 1 << 18; // VLAN Filter Enable
+            pub const CFIEN: u32 = 1 << 19; // Canonical Form Indicator Enable
+            pub const CFI: u32 = 1 << 20; // Canonical Form Indicator Bit Value
+            pub const DPF: u32 = 1 << 22; // Discard Pause Frames
+            pub const PMCF: u32 = 1 << 23; // Pass MAC Control Frames
+            pub const SECRC: u32 = 1 << 26; // Strip Ethernet CRC
+        }
+    }
 
-//
-// TCTL (Transmit Control) FLAGS (See 13.4.33 Intel docs)
-//
-const TCTL_EN: u32 = 0x1 << 1; // Transmit Enable
-const TCTL_PSP: u32 = 0x1 << 3; // Pad Short Packets
-const TCTL_CT_SHIFT: u32 = 4; // Collision Threshold
-const TCTL_COLD_SHIFT: u32 = 12; // Collision Distance
-const TCTL_SWXOFF: u32 = 1 << 22; // Software XOFF Transmission
-const TCTL_RTLC: u32 = 1 << 24; // Re-transmit on Late Collision
+    pub mod tx {
+        pub const CTRL: u16 = 0x0400; // Transmit Control
+        pub const DESC_LO: u16 = 0x3800; // Transmit Descriptor Base Low
+        pub const DESC_HI: u16 = 0x3804; // Transmit Descriptor Base High
 
-const TSTA_DD: u8 = 1 << 0; // Descriptor Done
-const TSTA_EC: u8 = 1 << 1; // Express Collisions
-const TSTA_LC: u8 = 1 << 2; // Late Collision
-const TSTA_TU: u8 = 1 << 3; // Transmit Underrun
+        pub const DESC_LEN: u16 = 0x3808;
+        pub const DESC_HEAD: u16 = 0x3810;
+        pub const DESC_TAIL: u16 = 0x3818;
 
-const CMD_EOP: u8 = 1 << 0;
-const CMD_IFCS: u8 = 1 << 1;
-const CMD_RS: u8 = 1 << 3;
+        pub mod ctrl {
+            //
+            // TCTL (Transmit Control) FLAGS (See 13.4.33 Intel docs)
+            //
+            pub const EN: u32 = 0x1 << 1; // Transmit Enable
+            pub const PSP: u32 = 0x1 << 3; // Pad Short Packets
+            pub const CT_SHIFT: u32 = 4; // Collision Threshold
+            pub const COLD_SHIFT: u32 = 12; // Collision Distance
+            pub const SWXOFF: u32 = 1 << 22; // Software XOFF Transmission
+            pub const RTLC: u32 = 1 << 24; // Re-transmit on Late Collision
+        }
 
-// INTERRUPTS
-const REG_I_MASK: u16 = 0x00D0; // Interrupt Mask Set/Read
-const REG_I_MASK_CLEAR: u16 = 0x00D8;
-const REG_I_READ: u16 = 0xC0;
+        pub const STATUS_DD: u8 = 1 << 0; // Descriptor Done
+        pub const STATUS_EC: u8 = 1 << 1; // Express Collisions
+        pub const STATUS_LC: u8 = 1 << 2; // Late Collision
+        pub const STATUS_TU: u8 = 1 << 3; // Transmit Underrun
 
-const I_RXT0: u32 = 0x80; // Receive timer
-const I_RX0: u32 = 0x10; // Receive overrun
-const I_LSC: u32 = 0x04; // Link Status Change
+        pub const CMD_EOP: u8 = 1 << 0;
+        pub const CMD_IFCS: u8 = 1 << 1;
+        pub const CMD_RS: u8 = 1 << 3;
+    }
 
-// MISC
-const MTA_LENGTH: usize = 128;
-const REG_MTA: [u16; MTA_LENGTH] = helpers::build_range::<MTA_LENGTH>(0x5200, 4); // Multicast Table Array 
+    pub mod int {
+        // INTERRUPTS
+        pub const MASK: u16 = 0x00D0; // Interrupt Mask Set/Read
+        pub const MASK_CLEAR: u16 = 0x00D8;
+        pub const CAUSE_READ: u16 = 0xC0;
 
-const RX_BUFFER_SIZE: usize = 8192;
+        pub const ICR_RXT0: u32 = 0x80; // Receive timer
+        pub const ICR_RX0: u32 = 0x10; // Receive overrun
+        pub const ICR_LSC: u32 = 0x04; // Link Status Change
+    }
+
+    // MISC
+    pub const MTA_LENGTH: usize = 128;
+    pub const REG_MTA: [u16; MTA_LENGTH] = helpers::build_range::<MTA_LENGTH>(0x5200, 4); // Multicast Table Array 
+
+    pub const RX_BUFFER_SIZE: usize = 8192;
+}
 
 #[derive(Copy, Clone)]
 #[repr(C, align(16))]
@@ -172,7 +186,6 @@ impl Default for E1000RxDesc {
 
 pub struct E1000 {
     interrupt_line: u8,
-    device: Arc<Mutex<PciDevice>>,
     bar0: AnyBAR,
     eeprom_exists: bool,
     mac: MacAddr,
@@ -203,7 +216,6 @@ impl E1000 {
         };
 
         Self {
-            device: guard,
             bar0,
             eeprom_exists: false,
             mac: MacAddr::zero(),
@@ -216,11 +228,11 @@ impl E1000 {
     }
 
     fn detect_eeprom(&mut self) -> bool {
-        unsafe { self.bar0.write_command(REG_EEPROM, 0x1) };
+        unsafe { self.bar0.write_command(cfg::EEPROM, 0x1) };
 
         self.eeprom_exists = false;
         for _ in 0..1000 {
-            if unsafe { self.bar0.read_command(REG_EEPROM) } & 0x10 > 0 {
+            if unsafe { self.bar0.read_command(cfg::EEPROM) } & 0x10 > 0 {
                 self.eeprom_exists = true;
                 break;
             }
@@ -235,19 +247,19 @@ impl E1000 {
         if self.eeprom_exists {
             unsafe {
                 self.bar0
-                    .write_command(REG_EEPROM, 1 | ((addr as u32) << 8))
+                    .write_command(cfg::EEPROM, 1 | ((addr as u32) << 8))
             };
             while {
-                tmp = unsafe { self.bar0.read_command(REG_EEPROM) };
+                tmp = unsafe { self.bar0.read_command(cfg::EEPROM) };
                 tmp & (1 << 4) == 0
             } {}
         } else {
             unsafe {
                 self.bar0
-                    .write_command(REG_EEPROM, 1 | ((addr as u32) << 2))
+                    .write_command(cfg::EEPROM, 1 | ((addr as u32) << 2))
             };
             while {
-                tmp = unsafe { self.bar0.read_command(REG_EEPROM) };
+                tmp = unsafe { self.bar0.read_command(cfg::EEPROM) };
                 tmp & (1 << 1) == 0
             } {}
         }
@@ -300,7 +312,7 @@ impl E1000 {
     }
 
     pub fn clear_mta(&mut self) {
-        for addr in REG_MTA {
+        for addr in cfg::REG_MTA {
             unsafe {
                 self.bar0.write_command(addr, 0x0);
             };
@@ -310,19 +322,20 @@ impl E1000 {
     pub fn enable_interrupts(&mut self) {
         unsafe {
             // read to clear all reg bits
-            self.bar0.read_command(REG_I_READ);
+            self.bar0.read_command(cfg::int::CAUSE_READ);
 
-            self.bar0.write_command(REG_I_MASK_CLEAR, 0xFFFFFFFF);
-            let imask = I_RX0 | I_LSC | I_RXT0;
-            self.bar0.write_command(REG_I_MASK, imask);
+            self.bar0.write_command(cfg::int::MASK_CLEAR, 0xFFFFFFFF);
+
+            let imask = cfg::int::ICR_RX0 | cfg::int::ICR_LSC | cfg::int::ICR_RXT0;
+            self.bar0.write_command(cfg::int::MASK, imask);
         }
     }
 
     fn get_desc_buffer_ptr(&self, buffer_idx: usize) -> *const u8 {
         let descs_addr = self.rx_descs_addr.as_u64();
-        let buffers_start_addr = descs_addr + (size_of::<E1000RxDesc>() * E1000_NUM_RX_DESC) as u64;
+        let buffers_start_addr = descs_addr + (size_of::<E1000RxDesc>() * cfg::NUM_RX_DESC) as u64;
 
-        (buffers_start_addr + (buffer_idx * RX_BUFFER_SIZE) as u64) as *const _
+        (buffers_start_addr + (buffer_idx * cfg::RX_BUFFER_SIZE) as u64) as *const _
     }
 
     fn handle_receive(&mut self) -> bool {
@@ -332,7 +345,7 @@ impl E1000 {
             let desc =
                 unsafe { &mut *self.rx_descs_addr.as_mut_ptr::<E1000RxDesc>().add(curr_idx) };
 
-            if unsafe { read_volatile(&desc.status) } & TSTA_DD == 0 {
+            if unsafe { read_volatile(&desc.status) } & cfg::tx::STATUS_DD == 0 {
                 break;
             }
 
@@ -348,10 +361,10 @@ impl E1000 {
             desc.status = 0;
 
             let old_cur = self.rx_cur;
-            self.rx_cur = (self.rx_cur + 1) % (E1000_NUM_RX_DESC as u16);
+            self.rx_cur = (self.rx_cur + 1) % (cfg::NUM_RX_DESC as u16);
 
             unsafe {
-                self.bar0.write_command(REG_RX_DESC_TAIL, old_cur as u32);
+                self.bar0.write_command(cfg::rx::DESC_TAIL, old_cur as u32);
             };
         }
 
@@ -359,16 +372,16 @@ impl E1000 {
     }
 
     pub fn rx_init(&mut self) {
-        const BLOCK_SIZE: usize = size_of::<E1000RxDesc>() * E1000_NUM_RX_DESC;
-        const TOTAL_SIZE: u64 = (BLOCK_SIZE + RX_BUFFER_SIZE * E1000_NUM_RX_DESC) as u64;
+        const BLOCK_SIZE: usize = size_of::<E1000RxDesc>() * cfg::NUM_RX_DESC;
+        const TOTAL_SIZE: u64 = (BLOCK_SIZE + cfg::RX_BUFFER_SIZE * cfg::NUM_RX_DESC) as u64;
 
         let (rx_virt, rx_phys) = alloc_dma_region(TOTAL_SIZE);
 
         let descs = rx_virt.as_mut_ptr::<E1000RxDesc>();
         let buffers_phys = rx_phys.as_u64() + BLOCK_SIZE as u64;
 
-        for i in 0..E1000_NUM_RX_DESC {
-            let buf_phys = buffers_phys + (i * RX_BUFFER_SIZE) as u64;
+        for i in 0..cfg::NUM_RX_DESC {
+            let buf_phys = buffers_phys + (i * cfg::RX_BUFFER_SIZE) as u64;
             unsafe {
                 let desc = &mut *descs.add(i);
                 desc.addr = buf_phys;
@@ -380,42 +393,42 @@ impl E1000 {
 
         unsafe {
             self.bar0
-                .write_command(REG_RX_DESC_LO, (rx_phys.as_u64() & 0xFFFF_FFFF) as u32);
+                .write_command(cfg::rx::DESC_LO, (rx_phys.as_u64() & 0xFFFF_FFFF) as u32);
             self.bar0
-                .write_command(REG_RX_DESC_HI, (rx_phys.as_u64() >> 32) as u32);
+                .write_command(cfg::rx::DESC_HI, (rx_phys.as_u64() >> 32) as u32);
             self.bar0
-                .write_command(REG_RX_DESC_LEN, (BLOCK_SIZE) as u32);
+                .write_command(cfg::rx::DESC_LEN, (BLOCK_SIZE) as u32);
 
-            self.bar0.write_command(REG_RX_DESC_HEAD, 0);
+            self.bar0.write_command(cfg::rx::DESC_HEAD, 0);
             self.bar0
-                .write_command(REG_RX_DESC_TAIL, (E1000_NUM_RX_DESC - 1) as u32);
+                .write_command(cfg::rx::DESC_TAIL, (cfg::NUM_RX_DESC - 1) as u32);
 
             let flags = 0x0
-                | RCTL_EN
-                | RCTL_SBP
-                | RCTL_UPE
-                | RCTL_MPE
-                | RCTL_LBM_NONE
-                | RCTL_RDMTS_HALF
-                | RCTL_BAM
-                | RCTL_SECRC
-                | RCTL_BSIZE_8192;
+                | cfg::rx::ctrl::EN
+                | cfg::rx::ctrl::SBP
+                | cfg::rx::ctrl::UPE
+                | cfg::rx::ctrl::MPE
+                | cfg::rx::ctrl::LBM_NONE
+                | cfg::rx::ctrl::RDMTS_HALF
+                | cfg::rx::ctrl::BAM
+                | cfg::rx::ctrl::SECRC
+                | cfg::rx::ctrl::BSIZE_8192;
 
-            self.bar0.write_command(REG_R_CTRL, flags);
+            self.bar0.write_command(cfg::rx::CTRL, flags);
         };
     }
 
     pub fn tx_init(&mut self) {
         let (tx_virt, tx_phys) =
-            alloc_dma_region((size_of::<E1000TxDesc>() * E1000_NUM_TX_DESC) as u64);
+            alloc_dma_region((size_of::<E1000TxDesc>() * cfg::NUM_TX_DESC) as u64);
 
         let tx_descs = tx_virt.as_mut_ptr::<E1000TxDesc>();
-        for i in 0..E1000_NUM_TX_DESC {
+        for i in 0..cfg::NUM_TX_DESC {
             unsafe {
                 let desc = tx_descs.add(i);
                 (*desc).addr = 0;
                 (*desc).cmd = 0;
-                (*desc).status = TSTA_DD;
+                (*desc).status = cfg::tx::STATUS_DD;
             }
         }
 
@@ -423,24 +436,24 @@ impl E1000 {
 
         unsafe {
             self.bar0
-                .write_command(REG_TX_DESC_LO, (tx_phys.as_u64() & 0xFFFFFFFF) as u32);
+                .write_command(cfg::tx::DESC_LO, (tx_phys.as_u64() & 0xFFFFFFFF) as u32);
             self.bar0
-                .write_command(REG_TX_DESC_HI, (tx_phys.as_u64() >> 32) as u32);
+                .write_command(cfg::tx::DESC_HI, (tx_phys.as_u64() >> 32) as u32);
 
             let tx_desc_size = size_of::<E1000TxDesc>();
             self.bar0
-                .write_command(REG_TX_DESC_LEN, (E1000_NUM_TX_DESC * tx_desc_size) as u32);
+                .write_command(cfg::tx::DESC_LEN, (cfg::NUM_TX_DESC * tx_desc_size) as u32);
 
-            self.bar0.write_command(REG_TX_DESC_HEAD, 0);
-            self.bar0.write_command(REG_TX_DESC_TAIL, 0);
+            self.bar0.write_command(cfg::tx::DESC_HEAD, 0);
+            self.bar0.write_command(cfg::tx::DESC_TAIL, 0);
 
             let flags = 0x0
-                | TCTL_EN
-                | TCTL_PSP
-                | (0xF << TCTL_CT_SHIFT)
-                | (64 << TCTL_COLD_SHIFT)
-                | TCTL_RTLC;
-            self.bar0.write_command(REG_T_CTRL, flags);
+                | cfg::tx::ctrl::EN
+                | cfg::tx::ctrl::PSP
+                | (0xF << cfg::tx::ctrl::CT_SHIFT)
+                | (64 << cfg::tx::ctrl::COLD_SHIFT)
+                | cfg::tx::ctrl::RTLC;
+            self.bar0.write_command(cfg::tx::CTRL, flags);
 
             // TODO: why?
             self.bar0.write_command(0x0410, 0x0060200A);
@@ -500,32 +513,32 @@ impl NetworkDriver for E1000 {
 
         desc.addr = tx_buf_phys.as_u64();
         desc.length = data.len() as u16;
-        desc.cmd = CMD_EOP | CMD_IFCS | CMD_RS;
+        desc.cmd = cfg::tx::CMD_EOP | cfg::tx::CMD_IFCS | cfg::tx::CMD_RS;
         desc.status = 0x0;
 
-        self.tx_cur = (self.tx_cur + 1) % (E1000_NUM_TX_DESC as u16);
+        self.tx_cur = (self.tx_cur + 1) % (cfg::NUM_TX_DESC as u16);
     }
 
     fn transmit(&mut self) {
         unsafe {
             self.bar0
-                .write_command(REG_TX_DESC_TAIL, self.tx_cur as u32)
+                .write_command(cfg::rx::DESC_TAIL, self.tx_cur as u32)
         };
     }
 
     fn is_up(&mut self) -> bool {
-        let status = unsafe { self.bar0.read_command(REG_STATUS) };
+        let status = unsafe { self.bar0.read_command(cfg::STATUS) };
         status & 0x2 != 0
     }
 
     fn handle_interrupt(&mut self, _: InterruptStackFrame) {
-        let status = unsafe { self.bar0.read_command(REG_I_READ) };
-        if status & I_RXT0 > 0 {
+        let status = unsafe { self.bar0.read_command(cfg::int::CAUSE_READ) };
+        if status & cfg::int::ICR_RXT0 > 0 {
             self.handle_receive();
         }
 
-        let imask = I_RX0 | I_LSC | I_RXT0;
-        unsafe { self.bar0.write_command(REG_I_MASK, imask) };
+        let imask = cfg::int::ICR_RX0 | cfg::int::ICR_LSC | cfg::int::ICR_RXT0;
+        unsafe { self.bar0.write_command(cfg::int::MASK, imask) };
     }
 
     fn get_interrupt_line(&self) -> u8 {

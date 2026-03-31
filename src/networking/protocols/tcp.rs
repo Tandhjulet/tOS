@@ -11,14 +11,17 @@ use crate::networking::protocols::dhcp::EnsureDHCPLease;
 use crate::networking::protocols::ip::{IP, IPProtocol};
 use crate::networking::protocols::socket::{RecvPacket, SOCKET_TABLE};
 
-const TCPFLAG_CWR: u8 = 0b1000_0000;
-const TCPFLAG_ECE: u8 = 0b0100_0000;
-const TCPFLAG_URG: u8 = 0b0010_0000;
-const TCPFLAG_ACK: u8 = 0b0001_0000;
-const TCPFLAG_PSH: u8 = 0b0000_1000;
-const TCPFLAG_RST: u8 = 0b0000_0100;
-const TCPFLAG_SYN: u8 = 0b0000_0010;
-const TCPFLAG_FIN: u8 = 0b0000_0001;
+pub mod flag {
+    #[allow(unused)]
+    pub const CWR: u8 = 0b1000_0000;
+    pub const ECE: u8 = 0b0100_0000;
+    pub const URG: u8 = 0b0010_0000;
+    pub const ACK: u8 = 0b0001_0000;
+    pub const PSH: u8 = 0b0000_1000;
+    pub const RST: u8 = 0b0000_0100;
+    pub const SYN: u8 = 0b0000_0010;
+    pub const FIN: u8 = 0b0000_0001;
+}
 
 pub struct TcpConnection {
     src_ip: Ipv4Addr,
@@ -71,37 +74,37 @@ impl TcpConnection {
         self.seq_num = 0xdeadbeef;
         self.state = TcpState::SYNSENT;
 
-        self.send(TCPFLAG_SYN, &[]).await?;
+        self.send(flag::SYN, &[]).await?;
 
         let synack = self.recv_ack().await?;
-        if synack.flags() != TCPFLAG_ACK | TCPFLAG_SYN {
+        if synack.flags() != flag::ACK | flag::SYN {
             return Err("Didn't receive SYN/ACK back from ACK!".to_owned());
         }
 
         self.state = TcpState::ESTABLISHED;
-        self.send(TCPFLAG_ACK, &[]).await?;
+        self.send(flag::ACK, &[]).await?;
 
         Ok(())
     }
 
     pub async fn close(&mut self) -> Result<(), String> {
         self.state = TcpState::FINWAIT1;
-        self.send(TCPFLAG_FIN | TCPFLAG_ACK, &[]).await?;
+        self.send(flag::FIN | flag::ACK, &[]).await?;
 
         let ack = self.recv_ack().await?;
-        if ack.flags() != TCPFLAG_ACK {
+        if ack.flags() != flag::ACK {
             return Err("Didn't receive ACK back from FIN!".to_owned());
         }
 
         self.state = TcpState::FINWAIT2;
 
         let finack = self.recv_ack().await?;
-        if finack.flags() != TCPFLAG_ACK | TCPFLAG_FIN {
+        if finack.flags() != flag::ACK | flag::FIN {
             return Err("Didn't receive FIN-ACK back from FIN!".to_owned());
         }
 
         self.state = TcpState::TIMEWAIT;
-        self.send(TCPFLAG_ACK, &[]).await?;
+        self.send(flag::ACK, &[]).await?;
 
         // TODO: normally wait for 240s before closing and releasing
 
@@ -247,7 +250,7 @@ impl TcpPacket {
 
     fn calc_seq_advance(&self) -> u32 {
         let mut n = self.data().len() as u32;
-        if self.flags() & (TCPFLAG_SYN | TCPFLAG_FIN) != 0 {
+        if self.flags() & (flag::SYN | flag::FIN) != 0 {
             n += 1;
         }
         n

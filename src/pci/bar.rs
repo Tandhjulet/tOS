@@ -7,7 +7,7 @@ use x86_64::{
     instructions::{interrupts::without_interrupts, port::Port},
 };
 
-use crate::{pci::PciDevice, println};
+use crate::pci::PciDevice;
 
 pub enum AnyBAR {
     IO(IOBar),
