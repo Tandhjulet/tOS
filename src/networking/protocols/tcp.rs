@@ -2,6 +2,7 @@ use core::net::Ipv4Addr;
 
 use alloc::borrow::ToOwned;
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use alloc::{format, vec};
 
@@ -71,18 +72,17 @@ impl TcpConnection {
         self.seq_num = 0xdeadbeef;
         self.state = TcpState::SYNSENT;
 
-        let syn = TcpPacket::new(&self, TCPFLAG_SYN, &[]);
+        let syn = TcpPacket::new(&self, TCPFLAG_SYN, Vec::new());
         self.send_packet(&syn).await?;
 
-        let data = self.recv_packet().await;
-        let synack = TcpPacket::parse_and_ack(self, &data)?;
+        let synack = self.recv_ack().await?;
         if synack.flags != TCPFLAG_ACK | TCPFLAG_SYN {
             return Err("Didn't receive SYN/ACK back from ACK!".to_owned());
         }
 
         self.state = TcpState::ESTABLISHED;
 
-        let ack = TcpPacket::new(&self, TCPFLAG_ACK, &[]);
+        let ack = TcpPacket::new(&self, TCPFLAG_ACK, Vec::new());
         self.send_packet(&ack).await?;
 
         Ok(())
@@ -90,26 +90,24 @@ impl TcpConnection {
 
     pub async fn close(&mut self) -> Result<(), String> {
         self.state = TcpState::FINWAIT1;
-        let fin = TcpPacket::new(&self, TCPFLAG_ACK | TCPFLAG_FIN, &[]);
+        let fin = TcpPacket::new(&self, TCPFLAG_ACK | TCPFLAG_FIN, Vec::new());
         self.send_packet(&fin).await?;
 
-        let data = self.recv_packet().await;
-        let ack = TcpPacket::parse_and_ack(self, &data)?;
+        let ack = self.recv_ack().await?;
         if ack.flags != TCPFLAG_ACK {
             return Err("Didn't receive ACK back from FIN!".to_owned());
         }
 
         self.state = TcpState::FINWAIT2;
 
-        let data = self.recv_packet().await;
-        let finack = TcpPacket::parse_and_ack(self, &data)?;
+        let finack = self.recv_ack().await?;
         if finack.flags != TCPFLAG_ACK | TCPFLAG_FIN {
             return Err("Didn't receive FIN-ACK back from FIN!".to_owned());
         }
 
         self.state = TcpState::TIMEWAIT;
 
-        let ack = TcpPacket::new(&self, TCPFLAG_ACK, &[]);
+        let ack = TcpPacket::new(&self, TCPFLAG_ACK, Vec::new());
         self.send_packet(&ack).await?;
 
         // TODO: normally wait for 240s before closing and releasing
@@ -121,16 +119,28 @@ impl TcpConnection {
         Ok(())
     }
 
-    async fn send_packet(&mut self, message: &TcpPacket<'_>) -> Result<(), String> {
-        let data = message.to_payload();
+    async fn send_packet(&mut self, message: &TcpPacket) -> Result<(), String> {
+        let data = message.raw();
 
         self.seq_num = self.seq_num + message.calc_seq_advance();
         IP::send_packet(self.src_ip, self.dst_ip, IPProtocol::TCP, &data).await?;
         Ok(())
     }
+
+    fn parse_and_ack<'a>(&mut self, data: Vec<u8>) -> Result<TcpPacket, String> {
+        let packet = TcpPacket::parse(self, data)?;
+        self.ack_num = packet.seq_num + packet.calc_seq_advance();
+        Ok(packet)
+    }
+
+    async fn recv_ack<'a>(&mut self) -> Result<TcpPacket, String> {
+        let data = self.recv_packet().await;
+        let packet = self.parse_and_ack(data)?;
+        Ok(packet)
+    }
 }
 
-pub struct TcpPacket<'a> {
+pub struct TcpPacket {
     src: Ipv4Addr,
     dst: Ipv4Addr,
 
@@ -139,19 +149,19 @@ pub struct TcpPacket<'a> {
 
     flags: u8,
     checksum: u16,
-    data: &'a [u8],
-    options: &'a [u8],
 
     header_offset: u8,
     window_size: u16,
 
     seq_num: u32,
     ack_num: u32,
+
+    buf: Vec<u8>,
 }
 
-impl<'a> TcpPacket<'a> {
-    pub fn new(connection: &TcpConnection, flags: u8, data: &'a [u8]) -> Self {
-        Self {
+impl TcpPacket {
+    pub fn new(connection: &TcpConnection, flags: u8, data: Vec<u8>) -> Self {
+        let mut packet = Self {
             src: connection.src_ip,
             dst: connection.dst_ip,
             dst_port: connection.dst_port,
@@ -159,8 +169,8 @@ impl<'a> TcpPacket<'a> {
 
             checksum: 0,
             flags,
-            data,
-            options: &[],
+
+            buf: Vec::new(),
 
             // FIXME
             header_offset: 5,
@@ -168,10 +178,33 @@ impl<'a> TcpPacket<'a> {
 
             seq_num: connection.seq_num,
             ack_num: connection.ack_num,
-        }
+        };
+
+        let payload = packet.get_payload(&data, &[]);
+        packet.buf = payload;
+
+        packet
     }
 
-    pub fn parse_and_ack(conn: &mut TcpConnection, data: &'a [u8]) -> Result<Self, String> {
+    pub fn data(&self) -> &[u8] {
+        let data_start = (self.header_offset as usize) * 4;
+        &self.buf[data_start..]
+    }
+
+    pub fn options(&self) -> &[u8] {
+        let data_start = (self.header_offset as usize) * 4;
+        &self.buf[20..data_start]
+    }
+
+    pub fn header(&self) -> &[u8] {
+        &self.buf[0..20]
+    }
+
+    pub fn raw(&self) -> &[u8] {
+        &self.buf
+    }
+
+    pub fn parse(conn: &mut TcpConnection, data: Vec<u8>) -> Result<Self, String> {
         let flags = data[13];
 
         let src_port = u16::from_be_bytes([data[0], data[1]]);
@@ -179,22 +212,12 @@ impl<'a> TcpPacket<'a> {
 
         let seq = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
         let ack = u32::from_be_bytes([data[8], data[9], data[10], data[11]]);
-        if flags & TCPFLAG_ACK > 0 && ack != conn.seq_num {
-            return Err(format!(
-                "received ack {} doesnt match seq+1: {}",
-                ack, conn.seq_num
-            ));
-        }
 
         let offset = data[12] >> 4;
 
         let window = u16::from_be_bytes([data[14], data[15]]);
         let checksum = u16::from_be_bytes([data[16], data[17]]);
         let urg = u16::from_be_bytes([data[18], data[19]]);
-
-        let data_start = (offset as usize) * 4;
-        let options = &data[20..data_start];
-        let payload = &data[data_start..];
 
         let packet = Self {
             // swap here as this is C->S traffic
@@ -207,20 +230,18 @@ impl<'a> TcpPacket<'a> {
             checksum,
             window_size: window,
             header_offset: offset,
-            data: payload,
-            options,
             ack_num: ack,
             seq_num: seq,
+
+            buf: data,
         };
 
         packet.validate(conn)?;
-        conn.ack_num = packet.seq_num + packet.calc_seq_advance();
-
         Ok(packet)
     }
 
     fn calc_seq_advance(&self) -> u32 {
-        let mut n = self.data.len() as u32;
+        let mut n = self.data().len() as u32;
         if self.flags & (TCPFLAG_SYN | TCPFLAG_FIN) != 0 {
             n += 1;
         }
@@ -235,36 +256,40 @@ impl<'a> TcpPacket<'a> {
         if self.ack_num != conn.seq_num {
             return Err(format!(
                 "Received ACK num {} does not match own SEQ num + 1: {}",
-                self.ack_num,
-                conn.seq_num + 1
+                self.ack_num, conn.seq_num
             ));
         }
 
         Ok(())
     }
 
-    pub fn to_payload(&self) -> Vec<u8> {
-        let buf_size = (self.header_offset as usize * 4) + self.data.len();
+    fn get_payload(&mut self, data: &[u8], options: &[u8]) -> Vec<u8> {
+        let buf_size = (self.header_offset as usize * 4) + data.len();
 
-        let mut buffer = vec![0u8; buf_size];
-        buffer[0..2].copy_from_slice(&self.src_port.to_be_bytes());
-        buffer[2..4].copy_from_slice(&self.dst_port.to_be_bytes());
-        buffer[4..8].copy_from_slice(&self.seq_num.to_be_bytes());
-        buffer[8..12].copy_from_slice(&self.ack_num.to_be_bytes());
-        buffer[12] = self.header_offset << 4;
-        buffer[13] = self.flags;
+        let mut buf = vec![0u8; buf_size];
+        buf[0..2].copy_from_slice(&self.src_port.to_be_bytes());
+        buf[2..4].copy_from_slice(&self.dst_port.to_be_bytes());
+        buf[4..8].copy_from_slice(&self.seq_num.to_be_bytes());
+        buf[8..12].copy_from_slice(&self.ack_num.to_be_bytes());
+        buf[12] = self.header_offset << 4;
+        buf[13] = self.flags;
 
         // FIXME: dont hardcode
-        buffer[14..16].copy_from_slice(&self.window_size.to_be_bytes());
-        buffer[16..18].copy_from_slice(&self.calculate_send_checksum().to_be_bytes());
-        // TODO: implement urgent ptrs
-        buffer[18..20].copy_from_slice(&[0u8, 0u8]);
+        buf[14..16].copy_from_slice(&self.window_size.to_be_bytes());
 
-        buffer.extend_from_slice(&self.data);
-        buffer
+        // TODO: implement urgent ptrs
+        buf[18..20].copy_from_slice(&[0u8, 0u8]);
+
+        buf.extend_from_slice(data);
+
+        // Don't use calculate_send_checksum here, as we the raw buffer isn't loaded yet
+        let checksum = !helpers::fold_sum(self.calculate_sum(data, options, false));
+        buf[16..18].copy_from_slice(&checksum.to_be_bytes());
+
+        buf
     }
 
-    pub fn calculate_sum(&self, include_checksum: bool) -> u32 {
+    fn calculate_sum(&self, data: &[u8], options: &[u8], include_checksum: bool) -> u32 {
         let mut sum: u32 = 0;
 
         for addr in [self.src, self.dst] {
@@ -273,7 +298,7 @@ impl<'a> TcpPacket<'a> {
             sum += u16::from_be_bytes([octets[2], octets[3]]) as u32;
         }
         sum += IPProtocol::TCP as u32;
-        sum += ((self.header_offset as usize * 4) + self.data.len()) as u32;
+        sum += ((self.header_offset as usize * 4) + data.len()) as u32;
 
         sum += self.src_port as u32;
         sum += self.dst_port as u32;
@@ -291,20 +316,20 @@ impl<'a> TcpPacket<'a> {
         }
         sum += 0; // urgent ptr
 
-        sum += helpers::sum_byte_arr(self.options);
-        sum += helpers::sum_byte_arr(self.data);
+        sum += helpers::sum_byte_arr(options);
+        sum += helpers::sum_byte_arr(data);
 
+        sum
+    }
+
+    pub fn calculate_recv_checksum(&self) -> u16 {
+        let sum = helpers::fold_sum(self.calculate_sum(self.data(), self.options(), true));
         sum
     }
 
     pub fn calculate_send_checksum(&self) -> u16 {
-        let sum = helpers::fold_sum(self.calculate_sum(false));
+        let sum = helpers::fold_sum(self.calculate_sum(self.data(), self.options(), false));
         !sum
-    }
-
-    pub fn calculate_recv_checksum(&self) -> u16 {
-        let sum = helpers::fold_sum(self.calculate_sum(true));
-        sum
     }
 }
 
