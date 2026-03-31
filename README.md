@@ -21,6 +21,15 @@ Speed is mostly slow here due to the fact that we're missing something like `sk_
 
 > Solution: pass a linked list (or something alike) along. Every layer that the packet passes through attaches a node pointing to a buffer containing the layer's header to the head of the linked list. Then, when it reaches the NIC driver, it iterates through the linked list, copying every buffer directly into NIC's TX buffer,
 
+### Networking To-Do's
+
+A (semi) ranked todo list regarding the networking implementation
+
+0. TCP and SSL/TLS and DNS!
+1. After having written a lot of structs around the different network layers, I didn't like the way I was doing it. Instead of keeping each field as seperate attrs on the struct, simply store the struct and make getters for each of them. This makes checksumming much easier, as the buffer can just be summed instead of having to do it manually. It also makes more sense conceptually, as this approach doesnt allow writes (as it only exposes getters) to the packet - and they should be immutable, after all!
+2. IP Fragmentation
+3. Perhaps fix the transmission issue described above
+
 ## Environment
 
 ```
