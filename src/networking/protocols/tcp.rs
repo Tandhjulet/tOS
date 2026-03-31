@@ -71,8 +71,7 @@ impl TcpConnection {
         self.seq_num = 0xdeadbeef;
         self.state = TcpState::SYNSENT;
 
-        let syn = TcpPacket::new(&self, TCPFLAG_SYN, &[]);
-        self.send_packet(&syn).await?;
+        self.send(TCPFLAG_SYN, &[]).await?;
 
         let synack = self.recv_ack().await?;
         if synack.flags() != TCPFLAG_ACK | TCPFLAG_SYN {
@@ -80,17 +79,14 @@ impl TcpConnection {
         }
 
         self.state = TcpState::ESTABLISHED;
-
-        let ack = TcpPacket::new(&self, TCPFLAG_ACK, &[]);
-        self.send_packet(&ack).await?;
+        self.send(TCPFLAG_ACK, &[]).await?;
 
         Ok(())
     }
 
     pub async fn close(&mut self) -> Result<(), String> {
         self.state = TcpState::FINWAIT1;
-        let fin = TcpPacket::new(&self, TCPFLAG_ACK | TCPFLAG_FIN, &[]);
-        self.send_packet(&fin).await?;
+        self.send(TCPFLAG_ACK, &[]).await?;
 
         let ack = self.recv_ack().await?;
         if ack.flags() != TCPFLAG_ACK {
@@ -105,16 +101,23 @@ impl TcpConnection {
         }
 
         self.state = TcpState::TIMEWAIT;
-
-        let ack = TcpPacket::new(&self, TCPFLAG_ACK, &[]);
-        self.send_packet(&ack).await?;
+        self.send(TCPFLAG_ACK, &[]).await?;
 
         // TODO: normally wait for 240s before closing and releasing
 
         self.state = TcpState::CLOSED;
-
         SOCKET_TABLE.lock().unbind(self.src_port, IPProtocol::TCP);
 
+        Ok(())
+    }
+
+    pub async fn recv(&mut self) -> Result<TcpPacket, String> {
+        self.recv_ack().await
+    }
+
+    pub async fn send(&mut self, flags: u8, data: &[u8]) -> Result<(), String> {
+        let packet = TcpPacket::new(&self, flags, data);
+        self.send_packet(&packet).await?;
         Ok(())
     }
 
@@ -126,15 +129,10 @@ impl TcpConnection {
         Ok(())
     }
 
-    fn parse_and_ack<'a>(&mut self, data: Vec<u8>) -> Result<TcpPacket, String> {
-        let packet = TcpPacket::parse(self, data)?;
-        self.ack_num = packet.seq_num() + packet.calc_seq_advance();
-        Ok(packet)
-    }
-
     async fn recv_ack<'a>(&mut self) -> Result<TcpPacket, String> {
         let data = self.recv_packet().await;
-        let packet = self.parse_and_ack(data)?;
+        let packet = TcpPacket::parse(self, data)?;
+        self.ack_num = packet.seq_num() + packet.calc_seq_advance();
         Ok(packet)
     }
 }
