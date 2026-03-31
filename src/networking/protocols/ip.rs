@@ -4,12 +4,12 @@ use alloc::vec;
 use alloc::{format, string::String, vec::Vec};
 use num_enum::TryFromPrimitive;
 
+use crate::helpers;
 use crate::networking::protocols::dhcp::EnsureDHCPLease;
 use crate::networking::protocols::ethernet::{EtherType, Ethernet, EthernetFrame};
 use crate::networking::protocols::socket::SOCKET_TABLE;
 use crate::networking::protocols::{arp::Arp, udp::UDP};
 use crate::networking::{MacAddr, NETWORK_INFO};
-use crate::{helpers, println};
 
 pub struct IP;
 
