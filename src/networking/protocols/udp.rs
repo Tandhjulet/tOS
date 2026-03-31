@@ -1,112 +1,145 @@
 use core::net::Ipv4Addr;
 
 use alloc::vec;
-use alloc::{format, string::String, vec::Vec};
+use alloc::{string::String, vec::Vec};
 
-use crate::networking::protocols::dhcp::{DHCP, DHCP_CLIENT_PORT};
-use crate::networking::protocols::ip::{IP, IPPacket, IPProtocol};
+use crate::helpers;
+use crate::networking::protocols::ip::{IP, IPProtocol};
+use crate::networking::protocols::socket::{RecvPacket, SOCKET_TABLE};
 
-pub struct UDP;
+pub struct UdpConnection {
+    src_ip: Ipv4Addr,
+    dst_ip: Ipv4Addr,
 
-impl UDP {
-    pub async fn send_packet(
-        src_ip: Ipv4Addr,
-        dst_ip: Ipv4Addr,
-        src_port: u16,
-        dst_port: u16,
-        data: &[u8],
-    ) -> Result<(), String> {
-        let message = UdpMessage::new(src_port, dst_port, data);
-        let payload = message.to_payload();
-
-        IP::send_packet(src_ip, dst_ip, IPProtocol::UDP, &payload).await?;
-        Ok(())
-    }
-
-    pub fn handle_packet(packet: IPPacket) -> Result<(), String> {
-        let message = UdpMessage::from(packet.data);
-
-        if !message.validate_checksum() {
-            return Err(format!(
-                "Checksum {} does not match expected {}!",
-                message.checksum,
-                message.calculate_checksum()
-            ));
-        }
-
-        // FIXME: abstract this dynamically
-        if message.dst_port == DHCP_CLIENT_PORT {
-            DHCP::handle_packet(message)?;
-        }
-
-        Ok(())
-    }
-}
-
-pub struct UdpMessage<'a> {
     src_port: u16,
     dst_port: u16,
-
-    length: u16,
-    checksum: u16,
-
-    data: &'a [u8],
 }
 
-impl<'a> UdpMessage<'a> {
-    pub fn new(src_port: u16, dst_port: u16, data: &'a [u8]) -> Self {
-        UdpMessage {
-            src_port,
+impl UdpConnection {
+    pub fn new(src_ip: Ipv4Addr, dst_ip: Ipv4Addr, src_port: u16, dst_port: u16) -> Self {
+        Self {
+            src_ip,
+            dst_ip,
             dst_port,
-            length: (data.len() + UdpMessage::header_len()) as u16,
-            checksum: 0,
-            data,
+            src_port,
         }
     }
 
-    pub fn from(payload: &'a [u8]) -> Self {
-        let src_port = u16::from_be_bytes([payload[0], payload[1]]);
-        let dst_port = u16::from_be_bytes([payload[2], payload[3]]);
-        let length = u16::from_be_bytes([payload[4], payload[5]]);
-        let checksum = u16::from_be_bytes([payload[6], payload[7]]);
+    pub fn open(&mut self) -> Result<(), String> {
+        SOCKET_TABLE.lock().bind(self.src_port, IPProtocol::UDP)?;
+        Ok(())
+    }
 
-        let data = &payload[8..(length as usize)];
+    pub async fn send(&self, data: &[u8]) -> Result<(), String> {
+        let packet = UdpPacket::new(&self, data);
 
-        Self {
-            src_port,
-            dst_port,
-            length,
-            checksum,
-            data,
+        IP::send_packet(self.src_ip, self.dst_ip, IPProtocol::UDP, packet.raw()).await?;
+        Ok(())
+    }
+
+    pub async fn recv(&self) -> Vec<u8> {
+        let payload = RecvPacket {
+            port: self.src_port,
+            protocol: IPProtocol::UDP,
         }
+        .await;
+
+        let message = UdpPacket::from(self, payload);
+
+        message.data().to_vec()
+    }
+}
+
+pub struct UdpPacket {
+    src: Ipv4Addr,
+    dst: Ipv4Addr,
+    buf: Vec<u8>,
+}
+
+impl UdpPacket {
+    pub fn new(conn: &UdpConnection, data: &[u8]) -> Self {
+        let buf_size = UdpPacket::header_len() + data.len();
+        let mut buf = vec![0u8; buf_size];
+
+        buf[0..2].copy_from_slice(&conn.src_port.to_be_bytes());
+        buf[2..4].copy_from_slice(&conn.dst_port.to_be_bytes());
+        buf[4..6].copy_from_slice(&(buf_size as u16).to_be_bytes());
+        buf[6..8].copy_from_slice(&0u16.to_be_bytes());
+        buf[8..].copy_from_slice(&data);
+
+        let mut packet = UdpPacket {
+            src: conn.src_ip,
+            dst: conn.dst_ip,
+            buf,
+        };
+
+        let checksum = packet.calculate_send_checksum();
+        packet.buf[6..8].copy_from_slice(&checksum.to_be_bytes());
+
+        packet
+    }
+
+    pub fn from(conn: &UdpConnection, payload: Vec<u8>) -> Self {
+        Self {
+            // Swapped as this is C->S
+            src: conn.dst_ip,
+            dst: conn.src_ip,
+            buf: payload,
+        }
+    }
+
+    pub fn src_port(&self) -> u16 {
+        u16::from_be_bytes([self.buf[0], self.buf[1]])
+    }
+
+    pub fn dst_port(&self) -> u16 {
+        u16::from_be_bytes([self.buf[2], self.buf[3]])
+    }
+
+    pub fn len(&self) -> u16 {
+        u16::from_be_bytes([self.buf[4], self.buf[5]])
+    }
+
+    pub fn checksum(&self) -> u16 {
+        u16::from_be_bytes([self.buf[6], self.buf[7]])
+    }
+
+    pub fn data(&self) -> &[u8] {
+        &self.buf[UdpPacket::header_len()..]
+    }
+
+    pub fn raw(&self) -> &[u8] {
+        &self.buf
     }
 
     pub const fn header_len() -> usize {
         8
     }
 
-    pub fn to_payload(&self) -> Vec<u8> {
-        let mut buf: Vec<u8> = vec![0u8; self.length as usize];
+    pub fn pseudo_header_sum(&self) -> u32 {
+        let mut sum = 0u32;
 
-        buf[0..2].copy_from_slice(&self.src_port.to_be_bytes());
-        buf[2..4].copy_from_slice(&self.dst_port.to_be_bytes());
-        buf[4..6].copy_from_slice(&self.length.to_be_bytes());
-        buf[6..8].copy_from_slice(&self.checksum.to_be_bytes());
-        buf[8..(self.length as usize)].copy_from_slice(&self.data);
+        for addr in [self.src, self.dst] {
+            let o = addr.octets();
+            sum += u16::from_be_bytes([o[0], o[1]]) as u32;
+            sum += u16::from_be_bytes([o[2], o[3]]) as u32;
+        }
+        sum += IPProtocol::UDP as u32;
+        sum += self.buf.len() as u32;
 
-        buf
+        sum
     }
 
-    pub fn data(&self) -> &[u8] {
-        self.data
+    pub fn calculate_recv_checksum(&self) -> u16 {
+        helpers::fold_sum(helpers::sum_byte_arr(&self.buf) + self.pseudo_header_sum())
     }
 
-    // TODO: implement checksumming (it's optional in ipv4)
-    pub fn calculate_checksum(&self) -> u16 {
-        0
-    }
-
-    pub fn validate_checksum(&self) -> bool {
-        true
+    pub fn calculate_send_checksum(&self) -> u16 {
+        let sum = helpers::fold_sum(
+            000 + helpers::sum_byte_arr(&self.buf[..6])
+                + helpers::sum_byte_arr(&self.buf[8..])
+                + self.pseudo_header_sum(),
+        );
+        !sum
     }
 }

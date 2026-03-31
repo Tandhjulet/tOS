@@ -172,7 +172,7 @@ impl TcpPacket {
         // TODO: implement urgent ptrs
         buf[18..20].copy_from_slice(&[0u8, 0u8]);
 
-        buf.extend_from_slice(&data);
+        buf[20..].copy_from_slice(&data);
 
         let mut packet = Self {
             src: conn.src_ip,
@@ -279,6 +279,10 @@ impl TcpPacket {
                 ack_num,
                 conn.seq_num + 1
             ));
+        }
+
+        if self.flags() & flag::RST > 0 {
+            return Err(format!("Connection Reset by peer!"));
         }
 
         Ok(())

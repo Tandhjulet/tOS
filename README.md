@@ -4,8 +4,6 @@ A very much work-in-progress OS & kernel for learning rust, x86-64 asm and C.
 
 the current road map is:
 
-- network stack
-    - missing: TCP (and perhaps SSL/TLS, HTTP(S))
 - shell
 - file system
 - GUI
@@ -13,7 +11,7 @@ the current road map is:
 
 ## Network Stack
 
-Currently, both RX and TX for the network stack is pretty slow. I've attached some points of improvement below, but it's unlikely they'll ever be implemented.
+Currently, TX for the network stack is pretty slow. I've attached some points of improvement below, but it's unlikely they'll ever be implemented.
 
 ### Transmission
 
@@ -25,7 +23,7 @@ Speed is mostly slow here due to the fact that we're missing something like `sk_
 
 A (semi) ranked todo list regarding the networking implementation
 
-0. TCP and SSL/TLS and DNS!
+0. DNS!
 1. IP Fragmentation
 2. Implement a packet buffer to fix the transmission issue described above
 

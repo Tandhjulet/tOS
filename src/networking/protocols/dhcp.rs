@@ -8,26 +8,19 @@ use spin::Mutex;
 
 use crate::networking::NETWORK_INFO;
 use crate::networking::protocols::ethernet::HardwareType;
-use crate::networking::{
-    MacAddr,
-    protocols::udp::{UDP, UdpMessage},
-};
+use crate::networking::{MacAddr, protocols::udp::UdpConnection};
 use crate::println;
 
 pub const DHCP_SERVER_PORT: u16 = 67;
 pub const DHCP_CLIENT_PORT: u16 = 68;
 pub const DHCP_TRANSACTION_IDENTIFIER: u32 = 0x55555555;
 
-static CURRENT_OFFER: Mutex<Option<DhcpMessage>> = Mutex::new(None);
-static DHCP_WAKER: Mutex<Option<Waker>> = Mutex::new(None);
-static DHCP_EVENT: Mutex<Option<DhcpEvent>> = Mutex::new(None);
-
 static LEASE_WAKERS: Mutex<Vec<Waker>> = Mutex::new(Vec::new());
 
 pub struct DHCP;
 
 impl DHCP {
-    pub async fn discover() {
+    pub async fn discover() -> Result<(), String> {
         let mac = { NETWORK_INFO.read().mac().unwrap() };
 
         let options = DhcpOptions::new()
@@ -42,34 +35,64 @@ impl DHCP {
         let src_ip = Ipv4Addr::new(0, 0, 0, 0);
         let dst_ip = Ipv4Addr::new(255, 255, 255, 255);
 
+        let mut socket = UdpConnection::new(src_ip, dst_ip, DHCP_CLIENT_PORT, DHCP_SERVER_PORT);
+        socket.open()?;
+
         let dhcp_broadcast = DhcpMessage::new(mac, "t_os".to_owned(), options);
+        socket.send(&dhcp_broadcast.to_payload()).await?;
 
-        UDP::send_packet(
-            src_ip,
-            dst_ip,
-            DHCP_CLIENT_PORT,
-            DHCP_SERVER_PORT,
-            &dhcp_broadcast.to_payload(),
-        )
-        .await
-        .unwrap();
-    }
+        let offer = DhcpMessage::from(&socket.recv().await)?;
+        DHCP::request(&socket, offer.yiaddr, offer.siaddr).await?;
 
-    fn post_event(event: DhcpEvent) {
-        *DHCP_EVENT.lock() = Some(event);
-        if let Some(waker) = DHCP_WAKER.lock().take() {
+        let ack = DhcpMessage::from(&socket.recv().await)?;
+        if NETWORK_INFO.read().dhcp().is_some() {
+            return Err("Received ACK but already have lease?".to_owned());
+        }
+
+        if ack.siaddr != offer.siaddr || ack.yiaddr != offer.yiaddr {
+            return Err(format!(
+                "Received ACK for {} from {} but accepted offer is from {} (with ip {})",
+                ack.yiaddr, ack.siaddr, offer.yiaddr, offer.siaddr
+            ));
+        }
+
+        let subnet_mask = match ack.options.find_from_tag(DhcpOptionKind::SubnetMask) {
+            Some(DhcpOption::SubnetMask(subnet_mask)) => *subnet_mask,
+            _ => Ipv4Addr::new(0, 0, 0, 0),
+        };
+
+        let gateway = match ack.options.find_from_tag(DhcpOptionKind::Router) {
+            Some(DhcpOption::Router(routers)) => *routers.first().unwrap(),
+            _ => Ipv4Addr::new(0, 0, 0, 0),
+        };
+
+        NETWORK_INFO.write().dhcp = Some(DhcpLease {
+            ip: ack.yiaddr,
+            server: ack.siaddr,
+            gateway,
+            client: ack.ciaddr,
+            subnet_mask,
+        });
+
+        let wakers = core::mem::take(&mut *LEASE_WAKERS.lock());
+        for waker in wakers {
             waker.wake();
         }
+
+        println!(
+            "Got a DHCP lease for ip {}!",
+            NETWORK_INFO.read().ip().unwrap()
+        );
+
+        Ok(())
     }
 
-    pub async fn request() {
+    async fn request(
+        socket: &UdpConnection,
+        yiaddr: Ipv4Addr,
+        siaddr: Ipv4Addr,
+    ) -> Result<(), String> {
         let mac = { NETWORK_INFO.read().mac().unwrap() };
-
-        let (yiaddr, siaddr) = {
-            let lock = CURRENT_OFFER.lock();
-            let offer = lock.as_ref().unwrap();
-            (offer.yiaddr, offer.siaddr)
-        };
 
         let options = DhcpOptions::new()
             .message_type(DhcpMessageType::DhcpRequest)
@@ -82,142 +105,10 @@ impl DHCP {
             .server_identifier(siaddr)
             .requested_ip(yiaddr);
 
-        let (udp_src_ip, udp_dst_ip) = {
-            // we don't own the offered ip yet - it's still 0
-            let src = Ipv4Addr::new(0, 0, 0, 0);
-            // requests are broadcast
-            let dst = Ipv4Addr::new(255, 255, 255, 255);
-            (src, dst)
-        };
-
         let dhcp_request = DhcpMessage::new(mac, "t_os".to_owned(), options);
 
-        UDP::send_packet(
-            udp_src_ip,
-            udp_dst_ip,
-            DHCP_CLIENT_PORT,
-            DHCP_SERVER_PORT,
-            &dhcp_request.to_payload(),
-        )
-        .await
-        .unwrap();
-    }
-
-    pub fn handle_packet(packet: UdpMessage) -> Result<(), String> {
-        let message = DhcpMessage::from(packet.data())?;
-        let options = &message.options;
-
-        let Some(DhcpOption::MessageType(dhcp_type)) =
-            options.find_from_tag(DhcpOptionKind::MessageType)
-        else {
-            return Err("Unknown DHCP type".to_owned());
-        };
-
-        match dhcp_type {
-            DhcpMessageType::DhcpOffer => {
-                if *dhcp_type == DhcpMessageType::DhcpOffer && CURRENT_OFFER.lock().is_some() {
-                    println!("Dropping offer... already have one!");
-                    return Ok(());
-                }
-
-                *CURRENT_OFFER.lock() = Some(message);
-
-                DHCP::post_event(DhcpEvent::OfferReceived);
-            }
-            DhcpMessageType::DhcpAck => {
-                if NETWORK_INFO.read().dhcp().is_some() {
-                    return Err("Received ACK but already have lease?".to_owned());
-                }
-
-                let (offer_yi, offer_si) = {
-                    let binding = CURRENT_OFFER.lock();
-                    let offer = binding.as_ref().unwrap();
-                    (offer.yiaddr, offer.siaddr)
-                };
-
-                if offer_yi != message.yiaddr || offer_si != message.siaddr {
-                    return Err(format!(
-                        "Received ACK for {} from {} but accepted offer is from {} (with ip {})",
-                        message.yiaddr, message.siaddr, offer_yi, offer_si
-                    ));
-                }
-
-                DHCP::post_event(DhcpEvent::Ack);
-            }
-            DhcpMessageType::DhcpNak => {
-                if NETWORK_INFO.read().dhcp().is_some() {
-                    return Err("Received NAK but already have lease?".to_owned());
-                }
-
-                DHCP::post_event(DhcpEvent::Nak);
-            }
-
-            // C -> S (unapplicable)
-            DhcpMessageType::DhcpDiscover
-            | DhcpMessageType::DhcpRelease
-            | DhcpMessageType::DhcpDecline
-            | DhcpMessageType::DhcpInform
-            | DhcpMessageType::DhcpRequest => {
-                println!(
-                    "Received {:?} despite it being a C->S packet (?)",
-                    dhcp_type
-                )
-            }
-        }
-
+        socket.send(&dhcp_request.to_payload()).await?;
         Ok(())
-    }
-
-    pub async fn dhcp_listener() {
-        DHCP::discover().await;
-
-        loop {
-            match DhcpEventFuture.await {
-                DhcpEvent::OfferReceived => {
-                    DHCP::request().await;
-                }
-                DhcpEvent::Ack => {
-                    {
-                        let lock = CURRENT_OFFER.lock();
-                        let dhcp = lock.as_ref().unwrap();
-
-                        let subnet_mask =
-                            match dhcp.options.find_from_tag(DhcpOptionKind::SubnetMask) {
-                                Some(DhcpOption::SubnetMask(subnet_mask)) => *subnet_mask,
-                                _ => Ipv4Addr::new(0, 0, 0, 0),
-                            };
-
-                        let gateway = match dhcp.options.find_from_tag(DhcpOptionKind::Router) {
-                            Some(DhcpOption::Router(routers)) => *routers.first().unwrap(),
-                            _ => Ipv4Addr::new(0, 0, 0, 0),
-                        };
-
-                        NETWORK_INFO.write().dhcp = Some(DhcpLease {
-                            ip: dhcp.yiaddr,
-                            server: dhcp.siaddr,
-                            gateway,
-                            client: dhcp.ciaddr,
-                            subnet_mask,
-                        });
-                    }
-
-                    let wakers = core::mem::take(&mut *LEASE_WAKERS.lock());
-                    for waker in wakers {
-                        waker.wake();
-                    }
-
-                    println!(
-                        "Got a DHCP lease for ip {}!",
-                        NETWORK_INFO.read().ip().unwrap()
-                    );
-                }
-                DhcpEvent::Nak => {
-                    // TODO
-                    println!("Received NAK!");
-                    break;
-                }
-            }
-        }
     }
 }
 
@@ -269,35 +160,6 @@ impl Future for EnsureDHCPLease {
 
         if let Some(_) = NETWORK_INFO.read().ip() {
             Poll::Ready(())
-        } else {
-            Poll::Pending
-        }
-    }
-}
-
-pub enum DhcpEvent {
-    OfferReceived,
-    Ack,
-    Nak,
-}
-
-struct DhcpEventFuture;
-
-impl Future for DhcpEventFuture {
-    type Output = DhcpEvent;
-
-    fn poll(
-        self: core::pin::Pin<&mut Self>,
-        cx: &mut core::task::Context<'_>,
-    ) -> core::task::Poll<Self::Output> {
-        if let Some(event) = DHCP_EVENT.lock().take() {
-            return Poll::Ready(event);
-        }
-
-        *DHCP_WAKER.lock() = Some(cx.waker().clone());
-
-        if let Some(event) = DHCP_EVENT.lock().take() {
-            Poll::Ready(event)
         } else {
             Poll::Pending
         }

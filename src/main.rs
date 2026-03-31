@@ -32,7 +32,6 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     interrupts::load_idt();
 
     let mut executor = Executor::new();
-    executor.spawn(Task::new(DHCP::dhcp_listener())); // FIXME: use a DHCP socket instead of this
     executor.spawn(Task::new(network_rx_task()));
     executor.spawn(Task::new(network_tx_task()));
     executor.spawn(Task::new(kernel_main_task()));
@@ -41,6 +40,8 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
 }
 
 async fn kernel_main_task() {
+    DHCP::discover().await.unwrap();
+
     let dst = Ipv4Addr::new(1, 1, 1, 1);
     let mut tcp = TcpConnection::new(dst, 1234, 80).await;
     tcp.open().await.unwrap();
