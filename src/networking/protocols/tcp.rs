@@ -27,8 +27,8 @@ pub struct TcpConnection {
     src_port: u16,
     dst_port: u16,
 
-    curr_ack_num: u32,
-    curr_seq_num: u32,
+    ack_num: u32,
+    seq_num: u32,
 
     state: TcpState,
 }
@@ -45,8 +45,8 @@ impl TcpConnection {
             src_port,
             dst_port,
 
-            curr_ack_num: 0,
-            curr_seq_num: 0,
+            ack_num: 0,
+            seq_num: 0,
 
             state: TcpState::CLOSED,
         }
@@ -68,25 +68,22 @@ impl TcpConnection {
         }
 
         // TODO: use random num
-        self.curr_seq_num = 0xdeadbeef;
+        self.seq_num = 0xdeadbeef;
         self.state = TcpState::SYNSENT;
 
         let syn = TcpPacket::new(&self, TCPFLAG_SYN, &[]);
         self.send_packet(&syn).await?;
 
         let data = self.recv_packet().await;
-        let synack = TcpPacket::parse(&self, &data)?;
+        let synack = TcpPacket::parse_and_ack(self, &data)?;
+        if synack.flags != TCPFLAG_ACK | TCPFLAG_SYN {
+            return Err("Didn't receive SYN/ACK back from ACK!".to_owned());
+        }
 
-        // TODO: cleanup
         self.state = TcpState::ESTABLISHED;
-        self.curr_seq_num = self.curr_seq_num + 1;
-        self.curr_ack_num = synack.seq_num + 1;
 
         let ack = TcpPacket::new(&self, TCPFLAG_ACK, &[]);
         self.send_packet(&ack).await?;
-
-        self.curr_ack_num = ack.seq_num + 1;
-        self.curr_seq_num = self.curr_seq_num + 1;
 
         Ok(())
     }
@@ -97,16 +94,17 @@ impl TcpConnection {
         self.send_packet(&fin).await?;
 
         let data = self.recv_packet().await;
-        let ack = TcpPacket::parse(&self, &data)?;
+        let ack = TcpPacket::parse_and_ack(self, &data)?;
 
         self.state = TcpState::FINWAIT2;
 
         Ok(())
     }
 
-    async fn send_packet(&self, message: &TcpPacket<'_>) -> Result<(), String> {
+    async fn send_packet(&mut self, message: &TcpPacket<'_>) -> Result<(), String> {
         let data = message.to_payload();
 
+        self.seq_num = self.seq_num + message.calc_seq_advance();
         IP::send_packet(self.src_ip, self.dst_ip, IPProtocol::TCP, &data).await?;
         Ok(())
     }
@@ -132,7 +130,7 @@ pub struct TcpPacket<'a> {
 }
 
 impl<'a> TcpPacket<'a> {
-    pub fn new(connection: &'a TcpConnection, flags: u8, data: &'a [u8]) -> Self {
+    pub fn new(connection: &TcpConnection, flags: u8, data: &'a [u8]) -> Self {
         Self {
             src: connection.src_ip,
             dst: connection.dst_ip,
@@ -148,12 +146,12 @@ impl<'a> TcpPacket<'a> {
             header_offset: 5,
             window_size: 0x0FFF,
 
-            seq_num: connection.curr_seq_num,
-            ack_num: connection.curr_ack_num,
+            seq_num: connection.seq_num,
+            ack_num: connection.ack_num,
         }
     }
 
-    pub fn parse(conn: &TcpConnection, data: &'a [u8]) -> Result<Self, String> {
+    pub fn parse_and_ack(conn: &mut TcpConnection, data: &'a [u8]) -> Result<Self, String> {
         let flags = data[13];
 
         let src_port = u16::from_be_bytes([data[0], data[1]]);
@@ -161,10 +159,10 @@ impl<'a> TcpPacket<'a> {
 
         let seq = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
         let ack = u32::from_be_bytes([data[8], data[9], data[10], data[11]]);
-        if flags & TCPFLAG_ACK > 0 && ack != conn.curr_seq_num + 1 {
+        if flags & TCPFLAG_ACK > 0 && ack != conn.seq_num {
             return Err(format!(
                 "received ack {} doesnt match seq+1: {}",
-                ack, conn.curr_seq_num
+                ack, conn.seq_num
             ));
         }
 
@@ -196,7 +194,17 @@ impl<'a> TcpPacket<'a> {
         };
 
         packet.validate(conn)?;
+        conn.ack_num = packet.seq_num + packet.calc_seq_advance();
+
         Ok(packet)
+    }
+
+    fn calc_seq_advance(&self) -> u32 {
+        let mut n = self.data.len() as u32;
+        if self.flags & (TCPFLAG_SYN | TCPFLAG_FIN) != 0 {
+            n += 1;
+        }
+        n
     }
 
     pub fn validate(&self, conn: &TcpConnection) -> Result<(), String> {
@@ -204,11 +212,11 @@ impl<'a> TcpPacket<'a> {
             return Err("Received checksum does not match calculated!".to_owned());
         }
 
-        if self.ack_num != conn.curr_seq_num + 1 {
+        if self.ack_num != conn.seq_num {
             return Err(format!(
                 "Received ACK num {} does not match own SEQ num + 1: {}",
                 self.ack_num,
-                conn.curr_seq_num + 1
+                conn.seq_num + 1
             ));
         }
 
