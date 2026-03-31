@@ -90,13 +90,33 @@ impl TcpConnection {
 
     pub async fn close(&mut self) -> Result<(), String> {
         self.state = TcpState::FINWAIT1;
-        let fin = TcpPacket::new(&self, TCPFLAG_FIN, &[]);
+        let fin = TcpPacket::new(&self, TCPFLAG_ACK | TCPFLAG_FIN, &[]);
         self.send_packet(&fin).await?;
 
         let data = self.recv_packet().await;
         let ack = TcpPacket::parse_and_ack(self, &data)?;
+        if ack.flags != TCPFLAG_ACK {
+            return Err("Didn't receive ACK back from FIN!".to_owned());
+        }
 
         self.state = TcpState::FINWAIT2;
+
+        let data = self.recv_packet().await;
+        let finack = TcpPacket::parse_and_ack(self, &data)?;
+        if ack.flags != TCPFLAG_ACK | TCPFLAG_FIN {
+            return Err("Didn't receive FIN-ACK back from FIN!".to_owned());
+        }
+
+        self.state = TcpState::TIMEWAIT;
+
+        let ack = TcpPacket::new(&self, TCPFLAG_ACK, &[]);
+        self.send_packet(&ack).await?;
+
+        // TODO: normally wait for 240s before closing and releasing
+
+        self.state = TcpState::CLOSED;
+
+        SOCKET_TABLE.lock().unbind(self.src_port, IPProtocol::TCP);
 
         Ok(())
     }
