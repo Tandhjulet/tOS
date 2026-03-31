@@ -103,7 +103,7 @@ impl TcpConnection {
 
         let data = self.recv_packet().await;
         let finack = TcpPacket::parse_and_ack(self, &data)?;
-        if ack.flags != TCPFLAG_ACK | TCPFLAG_FIN {
+        if finack.flags != TCPFLAG_ACK | TCPFLAG_FIN {
             return Err("Didn't receive FIN-ACK back from FIN!".to_owned());
         }
 
