@@ -522,7 +522,7 @@ impl NetworkDriver for E1000 {
     fn transmit(&mut self) {
         unsafe {
             self.bar0
-                .write_command(cfg::rx::DESC_TAIL, self.tx_cur as u32)
+                .write_command(cfg::tx::DESC_TAIL, self.tx_cur as u32)
         };
     }
 
