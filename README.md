@@ -11,17 +11,7 @@ the current road map is:
 
 ## Network Stack
 
-Currently, RX and TX for the network stack is pretty slow. Speed is mostly slow here due to the fact that we're missing something like `sk_buff` from Linux. For example, say we want to send a DHCP packet: the DHCP layer allocates room for its header and payload and writes it to that buffer. Then, it passes this buffer onto the UDP layer as the payload. The UDP layer now allocates a new buffer with room for its own header and the payload (DHCP header + original payload) and writes to that. This cycle continues until the packet finally reaches the NIC, having been copied unnecessarily for every layer it passed through. This is obviously a major slowdown of transmission speed.
-
-> Solution: pass a linked list (or something alike) along. Every layer that the packet passes through attaches a node pointing to a buffer containing the layer's header to the head of the linked list. Then, when it reaches the NIC driver, it iterates through the linked list, copying every buffer directly into NIC's TX buffer,
-
-### Networking To-Do's
-
-A (semi) ranked todo list regarding the networking implementation
-
-0. DNS!
-1. IP Fragmentation
-2. Implement a packet buffer to fix the transmission issue described above
+Currently, the network stack supports TCP/IP and UDP/IP. It has a very basic implementation of TCP that doesn't handle congestion control, packet loss recovery, etc. Furthermore, it doesn't support IP fragmentation, though that would be pretty trivial to add. As of now, while it does support DHCP, DNS is not yet implemented, either.
 
 ## Environment
 
