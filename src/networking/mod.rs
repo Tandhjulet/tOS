@@ -3,6 +3,7 @@ pub mod protocols;
 
 use core::{fmt::Display, net::Ipv4Addr, task::Poll};
 
+use alloc::vec;
 use alloc::{boxed::Box, collections::vec_deque::VecDeque, sync::Arc, vec::Vec};
 use futures_util::task::AtomicWaker;
 use spin::{Mutex, RwLock};
@@ -83,6 +84,55 @@ pub fn init() {
     NETWORK_INFO.write().mac = Some(*driver.get_mac_addr());
 }
 
+pub struct PacketBuf {
+    buf: Vec<u8>,
+    head: usize,
+}
+
+impl PacketBuf {
+    pub fn new(headroom: usize, data_len: usize, writer: impl FnOnce(&mut [u8])) -> Self {
+        let mut buf = vec![0u8; headroom + data_len];
+        writer(&mut buf[headroom..]);
+
+        Self {
+            buf,
+            head: headroom,
+        }
+    }
+
+    pub fn size(&self) -> usize {
+        self.buf.len()
+    }
+
+    pub fn write_header(&mut self, len: usize, writer: impl FnOnce(&mut [u8])) {
+        self.head -= len;
+        writer(&mut self.buf[self.head..self.head + len])
+    }
+
+    pub fn patch_header(&mut self, offset: usize, data: &[u8]) {
+        let start = self.head + offset;
+        self.buf[start..start + data.len()].copy_from_slice(data);
+    }
+
+    pub fn from(buf: Vec<u8>) -> Self {
+        Self { buf, head: 0 }
+    }
+
+    pub fn read_header(&mut self, len: usize) -> &[u8] {
+        let header = &self.buf[self.head..self.head + len];
+        self.head += len;
+        header
+    }
+
+    pub fn peek(&self, offset: usize) -> u8 {
+        self.buf[self.head + offset]
+    }
+
+    pub fn data(&self) -> &[u8] {
+        &self.buf[self.head..]
+    }
+}
+
 // tx
 struct TxPacketFuture;
 
@@ -155,7 +205,7 @@ pub async fn network_rx_task() {
                 raw
             };
 
-            let res = Ethernet::handle_packet(&raw);
+            let res = Ethernet::handle_packet(PacketBuf::from(raw));
             if let Err(msg) = res {
                 println!("NETWORK ERR: {}", msg);
             }

@@ -1,15 +1,14 @@
 use core::net::Ipv4Addr;
 
-use alloc::vec;
-use alloc::{format, string::String, vec::Vec};
+use alloc::{format, string::String};
 use num_enum::TryFromPrimitive;
 
 use crate::helpers;
 use crate::networking::protocols::arp::Arp;
 use crate::networking::protocols::dhcp::EnsureDHCPLease;
-use crate::networking::protocols::ethernet::{EtherType, Ethernet, EthernetFrame};
+use crate::networking::protocols::ethernet::{EtherType, Ethernet, EthernetHeader};
 use crate::networking::protocols::socket::SOCKET_TABLE;
-use crate::networking::{MacAddr, NETWORK_INFO};
+use crate::networking::{MacAddr, NETWORK_INFO, PacketBuf};
 
 pub struct IP;
 
@@ -19,13 +18,18 @@ impl IP {
         src: Ipv4Addr,
         dst: Ipv4Addr,
         protocol: IPProtocol,
-        data: &[u8],
+        mut buf: PacketBuf,
     ) -> Result<(), String> {
-        let packet = IPPacket::new(src, dst, protocol, data);
+        let ihl = 5;
+
+        let data_len = buf.data().len();
+        buf.write_header(ihl * 4, |wbuf| {
+            IpHeader::write(src, dst, protocol, data_len, wbuf);
+        });
 
         let mac = IP::get_route(dst).await?;
 
-        Ethernet::send_packet(mac, EtherType::IPv4, &packet.to_payload())?;
+        Ethernet::send_packet(mac, EtherType::IPv4, buf)?;
         Ok(())
     }
 
@@ -56,35 +60,34 @@ impl IP {
     }
 
     // TODO: handle fragmentation
-    pub fn handle_packet(packet: EthernetFrame) -> Result<(), String> {
-        let packet = IPPacket::from(packet.payload)?;
-        let header = &packet.header;
+    pub fn handle_packet(mut buf: PacketBuf) -> Result<(), String> {
+        let ihl = (buf.peek(0) & 0x0F) as usize * 4;
+        let header = IpHeader(buf.read_header(IpHeader::len(ihl)));
 
         // Some protocols, like IGMP, offload the checksum validation to hardware
-        if header.protocol.should_validate_checksum() {
+        let proto = header.protocol()?;
+        if proto.should_validate_checksum() {
             let checksum = header.calculate_recv_checksum();
             if checksum != 0xFFFF && checksum != 0 {
                 return Err(format!(
                     "Checksum did not match for packet of type {:?}! Received {:#x} but expected 0xFFFF",
-                    header.protocol, checksum
+                    proto, checksum
                 ));
             }
         }
 
-        if header.version != 4 {
+        if header.version() != 4 {
             return Err(format!(
                 "IP packet version {} is unsupported!",
-                header.version
+                header.version()
             ));
         }
 
-        match header.protocol {
+        match proto {
             IPProtocol::TCP | IPProtocol::UDP => {
-                let dst_port = u16::from_be_bytes([packet.data[2], packet.data[3]]);
+                let dst_port = u16::from_be_bytes([buf.peek(2), buf.peek(3)]);
 
-                SOCKET_TABLE
-                    .lock()
-                    .deliver(dst_port, header.protocol, Vec::from(packet.data));
+                SOCKET_TABLE.lock().deliver(dst_port, proto, buf);
 
                 Ok(())
             }
@@ -94,191 +97,125 @@ impl IP {
     }
 }
 
-pub struct IPPacket<'a> {
-    pub header: IPHeader,
-    pub data: &'a [u8],
-}
+pub struct IpHeader<'a>(&'a [u8]);
 
-impl<'a> IPPacket<'a> {
-    pub fn new(
+impl<'a> IpHeader<'a> {
+    pub fn write(
         src_addr: Ipv4Addr,
         dst_addr: Ipv4Addr,
         protocol: IPProtocol,
-        data: &'a [u8],
-    ) -> Self {
-        let mut header = IPHeader::new(src_addr, dst_addr, protocol, data.len() as u16);
-        header.checksum = header.calculate_send_checksum();
+        data_len: usize,
+        buf: &mut [u8],
+    ) {
+        // FIXME
+        let ihl = 5;
 
-        Self { header, data }
+        let header_len = (ihl * 4) as u16;
+        let total_length = header_len + (data_len as u16);
+        // let mut buf = vec![0u8; header_len as usize];
+
+        let version = 4;
+        buf[0] = (version << 4) | ihl;
+
+        let dscp = 0;
+        let ecn = 0;
+        buf[1] = (dscp << 2) | ecn;
+
+        buf[2..4].copy_from_slice(&total_length.to_be_bytes());
+
+        let identification = 0u16;
+        buf[4..6].copy_from_slice(&identification.to_be_bytes());
+
+        let flags = 0u32;
+        let fragment_offset = 0u16;
+        buf[6..8].copy_from_slice(&(((flags as u16) << 13) | fragment_offset).to_be_bytes());
+
+        let ttl = 64u8;
+        buf[8] = ttl;
+        buf[9] = protocol as u8;
+
+        buf[12..16].copy_from_slice(&src_addr.octets());
+        buf[16..20].copy_from_slice(&dst_addr.octets());
     }
 
-    pub fn from(payload: &'a [u8]) -> Result<Self, String> {
-        let header = IPHeader::from(payload)?;
-
-        let data_range = header.header_len()..(header.total_length as usize);
-        let data = &payload[data_range];
-
-        Ok(Self { header, data })
+    pub fn calculate_headroom(options: usize) -> usize {
+        EthernetHeader::len() + options * 4
     }
 
-    pub fn to_payload(&self) -> Vec<u8> {
-        let header_len = self.header.header_len();
-
-        let mut packet: Vec<u8> = vec![0u8; header_len + self.data.len()];
-        self.header.write_into(&mut packet[..header_len]);
-        packet[header_len..].copy_from_slice(self.data);
-
-        packet
-    }
-}
-
-pub struct IPHeader {
-    version: u8,
-    ihl: u8,
-    dscp: u8,
-    ecn: u8,
-    total_length: u16,
-
-    identification: u16,
-    flags: u8,
-    fragment_offset: u16,
-
-    ttl: u8,
-    protocol: IPProtocol,
-    checksum: u16,
-
-    src_addr: Ipv4Addr,
-    dst_addr: Ipv4Addr,
-}
-
-impl IPHeader {
-    pub fn new(
-        src_addr: Ipv4Addr,
-        dst_addr: Ipv4Addr,
-        protocol: IPProtocol,
-        data_len: u16,
-    ) -> Self {
-        let ihl = 5; // Specifices the number of 32-bit words in the header
-        let header_len = (ihl * 4) as u16; // 4 bytes in each ihl
-
-        let total_length = header_len + data_len;
-
-        Self {
-            version: 4, // IPv4 is always 4
-            ihl,
-            dscp: 0,      // Precedence, see https://en.wikipedia.org/wiki/Type_of_service
-            ecn: 0,       // ECN is unsupported for now
-            total_length, // Length of header + length of data
-            identification: 0,
-            // Fragmentation is unsupported for now
-            flags: 0,
-            fragment_offset: 0,
-
-            ttl: 64, // Seconds before timeout
-            protocol,
-            checksum: 0,
-
-            src_addr,
-            dst_addr,
-        }
+    pub fn len(ihl: usize) -> usize {
+        ihl * 4
     }
 
-    pub fn header_len(&self) -> usize {
-        (self.ihl as usize) * 4
+    pub fn ihl(&self) -> u8 {
+        self.0[0] & 0xF
     }
 
-    pub fn from(packet: &[u8]) -> Result<Self, String> {
-        let ihl = packet[0] & 0xF;
-        let version = (packet[0] >> 4) & 0xF;
+    pub fn version(&self) -> u8 {
+        self.0[0] >> 4
+    }
 
-        let dscp = packet[1] >> 2;
-        let ecn = packet[1] & 0b11;
+    pub fn dscp(&self) -> u8 {
+        self.0[1] >> 2
+    }
 
-        let length = u16::from_be_bytes([packet[2], packet[3]]);
-        let identification = u16::from_be_bytes([packet[4], packet[5]]);
+    pub fn ecn(&self) -> u8 {
+        self.0[1] & 0b11
+    }
 
-        let flags_fragment = u16::from_be_bytes([packet[6], packet[7]]);
-        let flags = (flags_fragment >> 13) as u8;
-        let fragment_offset = flags_fragment & 0x1FFF;
+    pub fn length(&self) -> u16 {
+        u16::from_be_bytes([self.0[2], self.0[3]])
+    }
 
-        let ttl = packet[8];
-        let raw_protocol = packet[9];
+    pub fn identification(&self) -> u16 {
+        u16::from_be_bytes([self.0[4], self.0[5]])
+    }
+
+    pub fn flags(&self) -> u8 {
+        let flags_fragment = u16::from_be_bytes([self.0[6], self.0[7]]);
+        (flags_fragment >> 13) as u8
+    }
+
+    pub fn fragment_offset(&self) -> u16 {
+        let flags_fragment = u16::from_be_bytes([self.0[6], self.0[7]]);
+        flags_fragment & 0x1FFF
+    }
+
+    pub fn ttl(&self) -> u8 {
+        self.0[8]
+    }
+
+    pub fn protocol(&self) -> Result<IPProtocol, String> {
+        let raw_protocol = self.0[9];
         let protocol = IPProtocol::try_from(raw_protocol)
             .map_err(|err| format!("failed to parse {:#x} as an IP protocol", err.number))?;
-
-        let checksum = u16::from_be_bytes([packet[10], packet[11]]);
-        let src_addr = Ipv4Addr::new(packet[12], packet[13], packet[14], packet[15]);
-        let dst_addr = Ipv4Addr::new(packet[16], packet[17], packet[18], packet[19]);
-
-        Ok(Self {
-            checksum,
-            dscp,
-            dst_addr,
-            ecn,
-            flags,
-            fragment_offset,
-            identification,
-            ihl,
-            total_length: length,
-            protocol,
-            src_addr,
-            ttl,
-            version,
-        })
+        Ok(protocol)
     }
 
-    pub fn write_into(&self, buf: &mut [u8]) {
-        buf[0] = (self.version << 4) | self.ihl;
-        buf[1] = (self.dscp << 2) | self.ecn;
-        buf[2..4].copy_from_slice(&self.total_length.to_be_bytes());
-        buf[4..6].copy_from_slice(&self.identification.to_be_bytes());
-        buf[6..8]
-            .copy_from_slice(&(((self.flags as u16) << 13) | self.fragment_offset).to_be_bytes());
-        buf[8] = self.ttl;
-        buf[9] = self.protocol as u8;
-        buf[10..12].copy_from_slice(&self.checksum.to_be_bytes());
-        buf[12..16].copy_from_slice(&self.src_addr.octets());
-        buf[16..20].copy_from_slice(&self.dst_addr.octets());
+    pub fn checksum(&self) -> u16 {
+        u16::from_be_bytes([self.0[10], self.0[11]])
     }
 
-    fn calculate_sum(&self, include_checksum: bool) -> u32 {
-        let mut sum: u32 = 0;
+    pub fn src(&self) -> Ipv4Addr {
+        Ipv4Addr::new(self.0[12], self.0[13], self.0[14], self.0[15])
+    }
 
-        let first_word = ((self.version as u16) << 12)
-            | ((self.ihl as u16) << 8)
-            | ((self.dscp as u16) << 2)
-            | (self.ecn as u16);
-        sum += first_word as u32;
+    pub fn dst(&self) -> Ipv4Addr {
+        Ipv4Addr::new(self.0[16], self.0[17], self.0[18], self.0[19])
+    }
 
-        sum += self.total_length as u32;
-        sum += self.identification as u32;
-        // Flags + Fragment Offset
-        sum += ((self.flags as u16) << 13 | self.fragment_offset) as u32;
-        // TTL + Protocol
-        sum += ((self.ttl as u16) << 8 | self.protocol as u16) as u32;
-
-        // Checksum field is zero during calculation
-        if include_checksum {
-            sum += self.checksum as u32;
-        }
-
-        // Source address
-        sum += u16::from_be_bytes([self.src_addr.octets()[0], self.src_addr.octets()[1]]) as u32;
-        sum += u16::from_be_bytes([self.src_addr.octets()[2], self.src_addr.octets()[3]]) as u32;
-        // Destination address
-        sum += u16::from_be_bytes([self.dst_addr.octets()[0], self.dst_addr.octets()[1]]) as u32;
-        sum += u16::from_be_bytes([self.dst_addr.octets()[2], self.dst_addr.octets()[3]]) as u32;
-
-        sum
+    pub fn options(&self) -> &[u8] {
+        &self.0[20..]
     }
 
     pub fn calculate_send_checksum(&self) -> u16 {
-        let sum = helpers::fold_sum(self.calculate_sum(false));
+        let sum = helpers::fold_sum(helpers::sum_byte_arr(&self.0));
         !sum
     }
 
     pub fn calculate_recv_checksum(&self) -> u16 {
-        let sum = helpers::fold_sum(self.calculate_sum(true));
+        let sum = helpers::fold_sum(
+            helpers::sum_byte_arr(&self.0[..10]) + helpers::sum_byte_arr(&self.0[12..]),
+        );
         sum
     }
 }

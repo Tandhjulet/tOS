@@ -1,15 +1,14 @@
 use core::net::Ipv4Addr;
 
 use alloc::borrow::ToOwned;
+use alloc::format;
 use alloc::string::String;
-use alloc::vec::Vec;
-use alloc::{format, vec};
 
 use crate::helpers;
-use crate::networking::NETWORK_INFO;
 use crate::networking::protocols::dhcp::EnsureDHCPLease;
-use crate::networking::protocols::ip::{IP, IPProtocol};
+use crate::networking::protocols::ip::{IP, IPProtocol, IpHeader};
 use crate::networking::protocols::socket::{RecvPacket, SOCKET_TABLE};
+use crate::networking::{NETWORK_INFO, PacketBuf};
 
 pub mod flag {
     #[allow(unused)]
@@ -114,23 +113,25 @@ impl TcpConnection {
     }
 
     pub async fn send_ack(&mut self, flags: u8, data: &[u8]) -> Result<TcpPacket, String> {
-        let packet = self.send(flags, data).await?;
+        let packet = TcpPacket::new(&self, flags, data);
+        let seq_advance = packet.calc_seq_advance();
+        self.send_packet(packet).await?;
 
         let recv = self.recv_ack().await?;
         if recv.flags() & flag::ACK > 0 {
-            self.seq_num = self.seq_num + packet.calc_seq_advance();
+            self.seq_num = self.seq_num + seq_advance;
         }
 
         Ok(recv)
     }
 
-    pub async fn send(&mut self, flags: u8, data: &[u8]) -> Result<TcpPacket, String> {
+    pub async fn send(&mut self, flags: u8, data: &[u8]) -> Result<(), String> {
         let packet = TcpPacket::new(&self, flags, data);
-        self.send_packet(&packet).await?;
-        Ok(packet)
+        self.send_packet(packet).await?;
+        Ok(())
     }
 
-    pub async fn recv(&self) -> Vec<u8> {
+    pub async fn recv(&self) -> PacketBuf {
         RecvPacket {
             port: self.src_port,
             protocol: IPProtocol::TCP,
@@ -138,9 +139,8 @@ impl TcpConnection {
         .await
     }
 
-    async fn send_packet(&mut self, message: &TcpPacket) -> Result<(), String> {
-        let data = message.raw();
-        IP::send_packet(self.src_ip, self.dst_ip, IPProtocol::TCP, &data).await?;
+    async fn send_packet(&mut self, message: TcpPacket) -> Result<(), String> {
+        IP::send_packet(self.src_ip, self.dst_ip, IPProtocol::TCP, message.buf).await?;
         Ok(())
     }
 }
@@ -148,31 +148,37 @@ impl TcpConnection {
 pub struct TcpPacket {
     src: Ipv4Addr,
     dst: Ipv4Addr,
-    buf: Vec<u8>,
+    buf: PacketBuf,
 }
 
 impl TcpPacket {
     pub fn new(conn: &TcpConnection, flags: u8, data: &[u8]) -> Self {
         // FIXME
+        let ip_opt_cnt = 0;
         let header_offset = 5;
-        let buf_size = (header_offset as usize * 4) + data.len();
 
-        let mut buf = vec![0u8; buf_size];
-        buf[0..2].copy_from_slice(&conn.src_port.to_be_bytes());
-        buf[2..4].copy_from_slice(&conn.dst_port.to_be_bytes());
-        buf[4..8].copy_from_slice(&conn.seq_num.to_be_bytes());
-        buf[8..12].copy_from_slice(&conn.ack_num.to_be_bytes());
-        buf[12] = header_offset << 4;
-        buf[13] = flags;
+        let mut buf = PacketBuf::new(
+            TcpPacket::calculate_headroom(ip_opt_cnt, header_offset),
+            data.len(),
+            |buf| {
+                buf.copy_from_slice(data);
+            },
+        );
 
-        // FIXME: dont hardcode
-        let window_size = 0x0FFFu16;
-        buf[14..16].copy_from_slice(&window_size.to_be_bytes());
+        buf.write_header(header_offset * 4, |buf| {
+            buf[0..2].copy_from_slice(&conn.src_port.to_be_bytes());
+            buf[2..4].copy_from_slice(&conn.dst_port.to_be_bytes());
+            buf[4..8].copy_from_slice(&conn.seq_num.to_be_bytes());
+            buf[8..12].copy_from_slice(&conn.ack_num.to_be_bytes());
+            buf[12] = (header_offset as u8) << 4;
+            buf[13] = flags;
 
-        // TODO: implement urgent ptrs
-        buf[18..20].copy_from_slice(&[0u8, 0u8]);
+            let window_size = 0x0FFFu16;
+            buf[14..16].copy_from_slice(&window_size.to_be_bytes());
 
-        buf[20..].copy_from_slice(&data);
+            // TODO: implement urgent ptrs
+            buf[18..20].copy_from_slice(&[0u8, 0u8]);
+        });
 
         let mut packet = Self {
             src: conn.src_ip,
@@ -181,66 +187,70 @@ impl TcpPacket {
         };
 
         let checksum = packet.calculate_send_checksum();
-        packet.buf[16..18].copy_from_slice(&checksum.to_be_bytes());
+        packet.buf.patch_header(16, &checksum.to_be_bytes());
 
         packet
     }
 
+    pub fn calculate_headroom(option_cnt: usize, header_offset: usize) -> usize {
+        IpHeader::calculate_headroom(5 + option_cnt) + header_offset * 4
+    }
+
     pub fn data_offset(&self) -> u8 {
-        self.buf[12] >> 4
+        self.raw()[12] >> 4
     }
 
     pub fn data(&self) -> &[u8] {
         let data_start = (self.data_offset() as usize) * 4;
-        &self.buf[data_start..]
+        &self.raw()[data_start..]
     }
 
     pub fn options(&self) -> &[u8] {
         let data_start = (self.data_offset() as usize) * 4;
-        &self.buf[20..data_start]
+        &self.raw()[20..data_start]
     }
 
     pub fn header(&self) -> &[u8] {
-        &self.buf[0..20]
+        &self.raw()[0..20]
     }
 
     pub fn raw(&self) -> &[u8] {
-        &self.buf
+        &self.buf.data()
     }
 
     pub fn ack_num(&self) -> u32 {
-        u32::from_be_bytes([self.buf[8], self.buf[9], self.buf[10], self.buf[11]])
+        u32::from_be_bytes([self.raw()[8], self.raw()[9], self.raw()[10], self.raw()[11]])
     }
 
     pub fn seq_num(&self) -> u32 {
-        u32::from_be_bytes([self.buf[4], self.buf[5], self.buf[6], self.buf[7]])
+        u32::from_be_bytes([self.raw()[4], self.raw()[5], self.raw()[6], self.raw()[7]])
     }
 
     pub fn flags(&self) -> u8 {
-        self.buf[13]
+        self.raw()[13]
     }
 
     pub fn src_port(&self) -> u16 {
-        u16::from_be_bytes([self.buf[0], self.buf[1]])
+        u16::from_be_bytes([self.raw()[0], self.raw()[1]])
     }
 
     pub fn dst_port(&self) -> u16 {
-        u16::from_be_bytes([self.buf[2], self.buf[3]])
+        u16::from_be_bytes([self.raw()[2], self.raw()[3]])
     }
 
     pub fn window(&self) -> u16 {
-        u16::from_be_bytes([self.buf[14], self.buf[15]])
+        u16::from_be_bytes([self.raw()[14], self.raw()[15]])
     }
 
     pub fn checksum(&self) -> u16 {
-        u16::from_be_bytes([self.buf[16], self.buf[17]])
+        u16::from_be_bytes([self.raw()[16], self.raw()[17]])
     }
 
     pub fn urg(&self) -> u16 {
-        u16::from_be_bytes([self.buf[18], self.buf[19]])
+        u16::from_be_bytes([self.raw()[18], self.raw()[19]])
     }
 
-    pub unsafe fn parse(conn: &mut TcpConnection, data: Vec<u8>) -> Self {
+    pub fn parse(conn: &mut TcpConnection, data: PacketBuf) -> Self {
         let packet = Self {
             // swap here as this is C->S traffic
             src: conn.dst_ip,
@@ -252,8 +262,8 @@ impl TcpPacket {
         packet
     }
 
-    pub fn validated(conn: &mut TcpConnection, data: Vec<u8>) -> Result<Self, String> {
-        let packet = unsafe { TcpPacket::parse(conn, data) };
+    pub fn validated(conn: &mut TcpConnection, data: PacketBuf) -> Result<Self, String> {
+        let packet = TcpPacket::parse(conn, data);
         packet.validate(conn)?;
 
         Ok(packet)
@@ -296,19 +306,19 @@ impl TcpPacket {
             sum += u16::from_be_bytes([o[2], o[3]]) as u32;
         }
         sum += IPProtocol::TCP as u32;
-        sum += self.buf.len() as u32;
+        sum += self.raw().len() as u32;
 
         sum
     }
 
     pub fn calculate_recv_checksum(&self) -> u16 {
-        helpers::fold_sum(helpers::sum_byte_arr(&self.buf) + self.pseudo_header_sum())
+        helpers::fold_sum(helpers::sum_byte_arr(&self.raw()) + self.pseudo_header_sum())
     }
 
-    pub fn calculate_send_checksum(&mut self) -> u16 {
+    pub fn calculate_send_checksum(&self) -> u16 {
         let sum = helpers::fold_sum(
-            000 + helpers::sum_byte_arr(&self.buf[..16])
-                + helpers::sum_byte_arr(&self.buf[18..])
+            helpers::sum_byte_arr(&self.raw()[..16])
+                + helpers::sum_byte_arr(&self.raw()[18..])
                 + self.pseudo_header_sum(),
         );
         !sum

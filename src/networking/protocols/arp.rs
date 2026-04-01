@@ -6,8 +6,8 @@ use num_enum::TryFromPrimitive;
 use spin::Mutex;
 
 use crate::networking::{
-    MacAddr, NETWORK_INFO,
-    protocols::ethernet::{EtherType, Ethernet, EthernetFrame, HardwareType},
+    MacAddr, NETWORK_INFO, PacketBuf,
+    protocols::ethernet::{EtherType, Ethernet, EthernetHeader, HardwareType},
 };
 
 static ARP_CACHE: Mutex<BTreeMap<Ipv4Addr, MacAddr>> = Mutex::new(BTreeMap::new());
@@ -17,7 +17,6 @@ pub struct Arp;
 
 impl Arp {
     pub(in crate::networking) fn init() {
-        // To allow DHCP, hardcode the broadcast entry
         ARP_CACHE
             .lock()
             .insert(Ipv4Addr::new(255, 255, 255, 255), MacAddr::broadcast());
@@ -26,12 +25,11 @@ impl Arp {
     fn send_request(ip: &Ipv4Addr) -> Result<(), &'static str> {
         let mac = { NETWORK_INFO.read().mac().unwrap() };
 
-        const ARP_LEN: usize = ArpMessage::len();
-        let mut arp_buf = [0u8; ARP_LEN];
-        let arp = ArpMessage::new(mac, *ip);
-        let arp_len = arp.write_to(&mut arp_buf);
+        let packet = PacketBuf::new(EthernetHeader::len(), ArpPacket::len(), |buf| {
+            ArpPacket::write(mac, *ip, buf);
+        });
 
-        Ethernet::send_packet(MacAddr::broadcast(), EtherType::ARP, &arp_buf[..arp_len])
+        Ethernet::send_packet(MacAddr::broadcast(), EtherType::ARP, packet)
     }
 
     pub async fn discover(ip: &Ipv4Addr) -> Result<MacAddr, &'static str> {
@@ -57,15 +55,15 @@ impl Arp {
         Arp::discover(ip).await.ok()
     }
 
-    pub fn handle_packet(packet: EthernetFrame) -> Result<(), String> {
-        let arp_response = ArpMessage::from(&packet.payload[..ArpMessage::len()])?;
+    pub fn handle_packet(packet: PacketBuf) -> Result<(), String> {
+        let arp_response = ArpPacket(packet.data());
 
         ARP_CACHE
             .lock()
-            .insert(arp_response.src_pc_addr, arp_response.src_hw_addr);
+            .insert(arp_response.src_ip(), arp_response.src_hw());
 
         let mut pending = PENDING_ARP.lock();
-        if let Some(waker) = pending.remove(&arp_response.src_pc_addr) {
+        if let Some(waker) = pending.remove(&arp_response.src_ip()) {
             waker.wake();
         }
 
@@ -101,19 +99,10 @@ impl Drop for ArpFuture {
     }
 }
 
-#[derive(Debug)]
-pub struct ArpMessage {
-    pub operation: Operation,
+pub struct ArpPacket<'a>(&'a [u8]);
 
-    pub src_hw_addr: MacAddr,
-    pub src_pc_addr: Ipv4Addr,
-
-    pub dst_hw_addr: MacAddr,
-    pub dst_pc_addr: Ipv4Addr,
-}
-
-impl ArpMessage {
-    pub fn new(src_mac: MacAddr, to_discover: Ipv4Addr) -> Self {
+impl<'a> ArpPacket<'a> {
+    pub fn write(src_mac: MacAddr, to_discover: Ipv4Addr, buf: &mut [u8]) {
         const DST_HW_ADDR: MacAddr = MacAddr::zero();
 
         let src_ip = match NETWORK_INFO.read().dhcp() {
@@ -121,59 +110,41 @@ impl ArpMessage {
             None => Ipv4Addr::new(0, 0, 0, 0),
         };
 
-        Self {
-            operation: Operation::ArpRequest,
-            src_hw_addr: src_mac,
-            src_pc_addr: src_ip,
-            dst_hw_addr: DST_HW_ADDR,
-            dst_pc_addr: to_discover,
-        }
-    }
-
-    pub fn from(packet: &[u8]) -> Result<Self, &'static str> {
-        if packet.len() != ArpMessage::len() {
-            return Err("buffer is not correctly sized");
-        }
-
-        let raw_op = u16::from_be_bytes([packet[6], packet[7]]);
-        let operation = Operation::try_from(raw_op).unwrap();
-
-        let src_hw = MacAddr::from_bytes(&packet[8..14]);
-
-        let mut raw_ip = [0u8; 4];
-        raw_ip.copy_from_slice(&packet[14..18]);
-        let src_ip = Ipv4Addr::new(raw_ip[0], raw_ip[1], raw_ip[2], raw_ip[3]);
-
-        let dst_hw = MacAddr::from_bytes(&packet[18..24]);
-
-        raw_ip.copy_from_slice(&packet[24..28]);
-        let dst_ip = Ipv4Addr::new(raw_ip[0], raw_ip[1], raw_ip[2], raw_ip[3]);
-
-        Ok(Self {
-            operation,
-            dst_hw_addr: dst_hw,
-            dst_pc_addr: dst_ip,
-            src_hw_addr: src_hw,
-            src_pc_addr: src_ip,
-        })
-    }
-
-    pub const fn len() -> usize {
-        28
-    }
-
-    pub fn write_to(&self, buf: &mut [u8]) -> usize {
         buf[0..2].copy_from_slice(&HardwareType::Ethernet.to_bytes()); // HW Type
         buf[2..4].copy_from_slice(&ARPProtocolType::IPv4.to_bytes()); // Protocol type
         buf[4] = 6; // HW length
         buf[5] = 4; // Protocol length
-        buf[6..8].copy_from_slice(&self.operation.to_bytes());
-        buf[8..14].copy_from_slice(&self.src_hw_addr.raw);
-        buf[14..18].copy_from_slice(&self.src_pc_addr.octets());
-        buf[18..24].copy_from_slice(&self.dst_hw_addr.raw);
-        buf[24..28].copy_from_slice(&self.dst_pc_addr.octets());
+        buf[6..8].copy_from_slice(&Operation::ArpRequest.to_bytes());
+        buf[8..14].copy_from_slice(&src_mac.octets());
+        buf[14..18].copy_from_slice(&src_ip.octets());
+        buf[18..24].copy_from_slice(&DST_HW_ADDR.octets());
+        buf[24..28].copy_from_slice(&to_discover.octets());
+    }
 
-        ArpMessage::len()
+    pub fn operation(&self) -> Result<Operation, &'static str> {
+        let raw_op = u16::from_be_bytes([self.0[6], self.0[7]]);
+        let operation = Operation::try_from(raw_op).unwrap();
+        Ok(operation)
+    }
+
+    pub fn src_hw(&self) -> MacAddr {
+        MacAddr::from_bytes(&self.0[8..14])
+    }
+
+    pub fn src_ip(&self) -> Ipv4Addr {
+        Ipv4Addr::new(self.0[14], self.0[15], self.0[16], self.0[17])
+    }
+
+    pub fn dst_hw(&self) -> MacAddr {
+        MacAddr::from_bytes(&self.0[18..24])
+    }
+
+    pub fn dst_ip(&self) -> Ipv4Addr {
+        Ipv4Addr::new(self.0[24], self.0[25], self.0[26], self.0[27])
+    }
+
+    pub const fn len() -> usize {
+        28
     }
 }
 

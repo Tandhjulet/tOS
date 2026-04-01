@@ -3,7 +3,7 @@ use core::task::{Context, Poll, Waker};
 use alloc::{collections::vec_deque::VecDeque, vec::Vec};
 use spin::Mutex;
 
-use crate::networking::protocols::ip::IPProtocol;
+use crate::networking::{PacketBuf, protocols::ip::IPProtocol};
 
 pub static SOCKET_TABLE: Mutex<SocketTable> = Mutex::new(SocketTable {
     entries: Vec::new(),
@@ -17,7 +17,7 @@ struct SocketEntry {
     src_port: u16,
     protocol: IPProtocol,
     waker: Option<Waker>,
-    incomming: VecDeque<Vec<u8>>,
+    incomming: VecDeque<PacketBuf>,
 }
 
 impl SocketTable {
@@ -43,7 +43,7 @@ impl SocketTable {
             .retain(|e| !(e.src_port == port && e.protocol == protocol));
     }
 
-    pub fn deliver(&mut self, port: u16, protocol: IPProtocol, data: Vec<u8>) {
+    pub fn deliver(&mut self, port: u16, protocol: IPProtocol, data: PacketBuf) {
         if let Some(entry) = self
             .entries
             .iter_mut()
@@ -61,7 +61,7 @@ impl SocketTable {
         port: u16,
         protocol: IPProtocol,
         cx: &mut Context,
-    ) -> Poll<Vec<u8>> {
+    ) -> Poll<PacketBuf> {
         if let Some(entry) = self
             .entries
             .iter_mut()
@@ -82,7 +82,7 @@ pub struct RecvPacket {
 }
 
 impl Future for RecvPacket {
-    type Output = Vec<u8>;
+    type Output = PacketBuf;
 
     fn poll(
         self: core::pin::Pin<&mut Self>,
