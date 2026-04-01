@@ -15,10 +15,7 @@ use crate::{
     allocator::mmio::{self, alloc_dma_region},
     interrupts::{IDT, MIN_INTERRUPT, PICS},
     networking::{MacAddr, RX_QUEUE, drivers::NetworkDriver},
-    pci::{
-        PciDevice,
-        bar::{Bar, BarKind},
-    },
+    pci::{PciDevice, bar::BarKind},
     println,
 };
 

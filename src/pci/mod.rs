@@ -17,13 +17,6 @@ lazy_static! {
     pub static ref DEVICES: Mutex<Vec<Arc<Mutex<PciDevice>>>> = Mutex::new(check_all_buses());
 }
 
-// See https://wiki.osdev.org/PCI#Header_Type_0x0
-const HEADER0_LINE0_OFFSET: u8 = 0x0;
-const HEADER0_LINE1_OFFSET: u8 = 0x4;
-const HEADER0_LINE2_OFFSET: u8 = 0x8;
-const HEADER0_LINE3_OFFSET: u8 = 0xC;
-const HEADER0_LINE15_OFFSET: u8 = 0x3C;
-
 //
 // Command Register flags
 // (See https://wiki.osdev.org/PCI#Command_Register for overview)
@@ -79,6 +72,7 @@ impl HeaderType {
 }
 
 impl PciDevice {
+    const OFF_ID: u8 = 0x0;
     const OFF_COMMAND_STATUS: u8 = 0x04;
     const OFF_CLASS: u8 = 0x08;
     const OFF_HEADER: u8 = 0x0C;
@@ -185,7 +179,7 @@ impl PciDevice {
     fn enumerate_bars(&mut self) {
         let mut slot = 0;
         while slot < self.header_type.bar_count() {
-            let offset = 0x10 + (slot as u8 * 4);
+            let offset = Self::OFF_BARS_START + (slot as u8 * 4);
             let raw = self.read(offset);
 
             if raw == 0 || raw == 0xFFFF_FFFF {
@@ -241,7 +235,7 @@ fn check_device(bus: u8, device: u8, devices: &mut Vec<Arc<Mutex<PciDevice>>>) {
         return;
     }
 
-    let header = ((pci_read(bus, device, 0, HEADER0_LINE3_OFFSET) >> 16) & 0xFF) as u8;
+    let header = ((pci_read(bus, device, 0, PciDevice::OFF_HEADER) >> 16) & 0xFF) as u8;
     if (header & 0x80) != 0 {
         for function in 1..8 {
             if let Some(dev) = check_function(bus, device, function) {
@@ -252,22 +246,13 @@ fn check_device(bus: u8, device: u8, devices: &mut Vec<Arc<Mutex<PciDevice>>>) {
 }
 
 fn check_function(bus: u8, device: u8, function: u8) -> Option<PciDevice> {
-    let id: u32 = pci_read(bus, device, function, HEADER0_LINE0_OFFSET);
+    let id: u32 = pci_read(bus, device, function, PciDevice::OFF_ID);
     let vendor_id = (id & 0xFFFF) as u16;
     if vendor_id == 0xFFFF {
         return None;
     }
 
     PciDevice::new(id, bus, device, function).ok()
-}
-
-fn unpack_quad(val: u32) -> (u8, u8, u8, u8) {
-    let first = (val & 0xFF) as u8;
-    let second = ((val >> 8) & 0xFF) as u8;
-    let third = ((val >> 16) & 0xFF) as u8;
-    let fourth = ((val >> 24) & 0xFF) as u8;
-
-    (fourth, third, second, first)
 }
 
 fn get_addr(bus: u8, device: u8, func: u8, offset: u8) -> u32 {
