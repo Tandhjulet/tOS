@@ -2,17 +2,16 @@ pub mod bar;
 
 use core::fmt;
 
-use alloc::{sync::Arc, vec::Vec};
+use alloc::{format, string::String, sync::Arc, vec::Vec};
 use lazy_static::lazy_static;
+use num_enum::TryFromPrimitive;
 use spin::Mutex;
 use x86_64::instructions::port::Port;
 
-use crate::pci::bar::AnyBAR;
+use crate::pci::bar::Bar;
 
 const CONFIG_ADDRESS: u16 = 0xCF8;
 const CONFIG_DATA: u16 = 0xCFC;
-
-const BAR_OFFSETS: &[u8] = &[0x10, 0x14, 0x18, 0x1C, 0x20, 0x24];
 
 lazy_static! {
     pub static ref DEVICES: Mutex<Vec<Arc<Mutex<PciDevice>>>> = Mutex::new(check_all_buses());
@@ -42,36 +41,78 @@ pub mod cmd {
     pub const INTERRUPT: u16 = 1 << 10; // If set, the devices INTx# signal is disabled
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug)]
 pub struct PciDevice {
-    pub bus: u8,
-    pub device: u8,
-    pub function: u8,
+    bus: u8,
+    device: u8,
+    function: u8,
 
-    // Reg 0x0 @ Offset 0x0
-    pub vendor_id: u16,
-    pub device_id: u16,
+    vendor_id: u16,
+    device_id: u16,
+    class: u8,
+    subclass: u8,
 
-    // Reg 0x1 @ Offset 0x4
-    pub status: u16,
-    pub command: u16,
+    bars: Vec<Option<Bar>>,
+    header_type: HeaderType,
+}
 
-    // Reg 0x2 @ Offset 0x8
-    pub class: u8,
-    pub subclass: u8,
+#[derive(Debug, Clone, Copy, TryFromPrimitive)]
+#[repr(u8)]
+pub enum HeaderType {
+    General = 0x0,  // endpoint devicee
+    PciToPci = 0x1, // bridge
+    CardBus = 0x2,
+}
 
-    // Reg 0x3 @ Offset 0xC
-    pub header_type: u8,
-    pub latency: u8,
-    pub cache_line_size: u8,
-    pub bist: u8,
+impl HeaderType {
+    fn bar_count(self) -> usize {
+        match self {
+            HeaderType::General => 6,
+            HeaderType::PciToPci => 2,
+            _ => 0,
+        }
+    }
 
-    // Reg 0xF @ 0x3C
-    pub interrupt_pin: u8,
-    pub interrupt_line: u8,
+    pub fn is_multi_function(raw: u8) -> bool {
+        raw & 0x80 != 0
+    }
 }
 
 impl PciDevice {
+    const OFF_COMMAND_STATUS: u8 = 0x04;
+    const OFF_CLASS: u8 = 0x08;
+    const OFF_HEADER: u8 = 0x0C;
+    const OFF_INTERRUPT: u8 = 0x3C;
+    const OFF_BARS_START: u8 = 0x10;
+
+    pub fn new(id: u32, bus: u8, device: u8, function: u8) -> Result<Self, String> {
+        let vendor_id = (id & 0xFFFF) as u16;
+        let device_id = (id >> 16) as u16;
+
+        let class_reg = pci_read(bus, device, function, Self::OFF_CLASS);
+        let class = (class_reg >> 24) as u8;
+        let subclass = (class_reg >> 16) as u8;
+
+        let header_raw = (pci_read(bus, device, function, Self::OFF_CLASS) >> 16) as u8;
+        let header_type = HeaderType::try_from(header_raw)
+            .map_err(|err| format!("failed to map {:#x} to a header type", err.number))?;
+
+        let mut device = Self {
+            bus,
+            device,
+            function,
+            bars: Vec::with_capacity(header_type.bar_count()),
+            vendor_id,
+            device_id,
+            class,
+            subclass,
+            header_type,
+        };
+        device.enumerate_bars();
+
+        Ok(device)
+    }
+
     pub fn read(&self, offset: u8) -> u32 {
         pci_read(self.bus, self.device, self.function, offset)
     }
@@ -80,47 +121,88 @@ impl PciDevice {
         pci_write(self.bus, self.device, self.function, offset, value);
     }
 
-    pub fn bar_count(&self) -> u8 {
-        // https://wiki.osdev.org/PCI#Header_Type_0x0
-        if self.header_type == 0x0 {
-            return 6;
-        } else if self.header_type == 0x1 {
-            return 2;
+    pub fn get_bar(&self, index: usize) -> Option<&Bar> {
+        self.bars.get(index)?.as_ref()
+    }
+
+    pub fn header_type(&self) -> HeaderType {
+        self.header_type
+    }
+
+    pub fn bus(&self) -> u8 {
+        self.bus
+    }
+
+    pub fn device(&self) -> u8 {
+        self.device
+    }
+
+    pub fn function(&self) -> u8 {
+        self.function
+    }
+
+    pub fn vendor_id(&self) -> u16 {
+        self.vendor_id
+    }
+
+    pub fn device_id(&self) -> u16 {
+        self.device_id
+    }
+
+    pub fn class(&self) -> u8 {
+        self.class
+    }
+
+    pub fn subclass(&self) -> u8 {
+        self.subclass
+    }
+
+    pub fn command(&self) -> u16 {
+        (self.read(Self::OFF_COMMAND_STATUS) & 0xFFFF) as u16
+    }
+
+    pub fn status(&self) -> u16 {
+        (self.read(Self::OFF_COMMAND_STATUS) >> 16) as u16
+    }
+
+    pub fn interrupt_line(&self) -> u8 {
+        (self.read(Self::OFF_INTERRUPT) & 0xFF) as u8
+    }
+
+    pub fn interrupt_pin(&self) -> u8 {
+        ((self.read(Self::OFF_INTERRUPT) >> 8) & 0xFF) as u8
+    }
+
+    pub fn set_command(&self, cmd: u16) {
+        let val = (self.status() as u32) << 16 | cmd as u32;
+        self.write(Self::OFF_COMMAND_STATUS, val);
+    }
+
+    pub fn enable_bus_mastering(&self) {
+        self.set_command(self.command() | cmd::BUS_MASTER);
+    }
+
+    fn enumerate_bars(&mut self) {
+        let mut slot = 0;
+        while slot < self.header_type.bar_count() {
+            let offset = 0x10 + (slot as u8 * 4);
+            let raw = self.read(offset);
+
+            if raw == 0 || raw == 0xFFFF_FFFF {
+                self.bars.push(None);
+                slot += 1;
+                continue;
+            }
+
+            let (bar, slots_used) = Bar::from_cfg(&self, offset);
+
+            self.bars.push(Some(bar));
+            for _ in 1..slots_used {
+                self.bars.push(None);
+            }
+
+            slot += slots_used as usize;
         }
-
-        return 0;
-    }
-
-    pub fn get_bar_offset(&self, bar: usize) -> u8 {
-        return BAR_OFFSETS[bar];
-    }
-
-    pub fn get_bar(device: &Arc<Mutex<Self>>, bar: u8) -> AnyBAR {
-        let bar_cnt = device.lock().bar_count();
-
-        // invalid bar count
-        if bar > bar_cnt - 1 {
-            panic!(
-                "Invalid! BAR{} doesnt exist for type 0x{:04x}",
-                bar,
-                device.lock().header_type
-            );
-        }
-
-        let (offset, bar) = {
-            let lock = device.lock();
-            let offset = lock.get_bar_offset(bar as usize);
-            (offset, lock.read(offset))
-        };
-
-        AnyBAR::from_raw(bar, offset, Arc::clone(device))
-    }
-
-    pub fn enable_bus_mastering(&mut self) {
-        self.command |= cmd::BUS_MASTER;
-
-        let val = ((self.status as u32) << 16) | (self.command as u32);
-        self.write(HEADER0_LINE1_OFFSET, val);
     }
 }
 
@@ -176,40 +258,7 @@ fn check_function(bus: u8, device: u8, function: u8) -> Option<PciDevice> {
         return None;
     }
 
-    let device_id = (id >> 16) as u16;
-
-    let class_reg = pci_read(bus, device, function, HEADER0_LINE1_OFFSET);
-    let command = (class_reg & 0xFFFF) as u16;
-    let status = (class_reg >> 16) as u16;
-
-    let class_reg = pci_read(bus, device, function, HEADER0_LINE2_OFFSET);
-    let class = ((class_reg >> 24) & 0xFF) as u8;
-    let subclass = ((class_reg >> 16) & 0xFF) as u8;
-
-    let line3 = pci_read(bus, device, function, HEADER0_LINE3_OFFSET);
-    let (bist, header_type, latency, cache_line_size) = unpack_quad(line3);
-
-    // Line 0xF always contains interrupt pin and interrupts line
-    let line15 = pci_read(bus, device, function, HEADER0_LINE15_OFFSET);
-    let (_, _, interrupt_pin, interrupt_line) = unpack_quad(line15);
-
-    Some(PciDevice {
-        bus,
-        device,
-        command,
-        status,
-        function,
-        vendor_id,
-        device_id,
-        class,
-        subclass,
-        cache_line_size,
-        latency,
-        header_type,
-        bist,
-        interrupt_line,
-        interrupt_pin,
-    })
+    PciDevice::new(id, bus, device, function).ok()
 }
 
 fn unpack_quad(val: u32) -> (u8, u8, u8, u8) {

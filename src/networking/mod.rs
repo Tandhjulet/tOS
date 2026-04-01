@@ -61,7 +61,7 @@ pub fn init() {
         // https://wiki.osdev.org/PCI#Class_Codes
         let device = devices.iter_mut().find(|d| {
             let d = d.lock();
-            d.class == 0x2 && d.subclass == 0x0
+            d.class() == 0x2 && d.subclass() == 0x0
         });
 
         let Some(device) = device else { return };
@@ -70,7 +70,9 @@ pub fn init() {
         drop(devices); // release the DEVICES lock before locking the individual device to avoid potential deadlocks
 
         // FIXME: make this dynamic
-        let driver = E1000::new(device);
+        let Ok(driver) = E1000::new(device) else {
+            panic!("Could not configure network driver!");
+        };
         *NETWORK_DRIVER.lock() = Some(Box::new(driver));
 
         NETWORK_DRIVER.lock()

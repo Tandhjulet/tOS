@@ -1,7 +1,8 @@
-use core::ptr::{read_volatile, write_volatile};
+use core::{
+    cell::Cell,
+    ptr::{read_volatile, write_volatile},
+};
 
-use alloc::sync::Arc;
-use spin::Mutex;
 use x86_64::{
     PhysAddr, VirtAddr,
     instructions::{interrupts::without_interrupts, port::Port},
@@ -40,7 +41,7 @@ pub struct Bar {
     offset: u8,
 
     // Only meaningful for Mem Baars
-    virt: Option<VirtAddr>,
+    virt: Cell<Option<VirtAddr>>,
 }
 
 // I/O Space BAR layout
@@ -62,7 +63,7 @@ impl Bar {
                 kind,
                 size,
                 offset,
-                virt: None,
+                virt: Cell::new(None),
             },
             slots_used,
         )
@@ -129,18 +130,18 @@ impl Bar {
     }
 
     pub fn virt_addr(&self) -> Option<VirtAddr> {
-        self.virt
+        self.virt.get()
     }
 
-    pub fn set_virt_addr(&mut self, addr: VirtAddr) {
+    pub fn set_virt_addr(&self, addr: VirtAddr) {
         assert!(
             matches!(self.kind, BarKind::Mem { .. }),
             "Cannot set virt_addr for an I/O BAR"
         );
-        self.virt = Some(addr);
+        self.virt.set(Some(addr));
     }
 
-    pub unsafe fn write32(&mut self, reg_offset: u16, val: u32) {
+    pub unsafe fn write32(&self, reg_offset: u16, val: u32) {
         match self.kind {
             BarKind::Io { addr } => unsafe {
                 let mut port: Port<u32> = Port::new(addr.0 + reg_offset);
@@ -148,7 +149,7 @@ impl Bar {
             },
             BarKind::Mem { .. } => {
                 let virt = self
-                    .virt
+                    .virt_addr()
                     .expect("write32 on Mem BAR before virt_addr was set");
 
                 let ptr = (virt.as_u64() + reg_offset as u64) as *mut u32;
@@ -159,7 +160,7 @@ impl Bar {
         }
     }
 
-    pub unsafe fn read32(&mut self, reg_offset: u16) -> u32 {
+    pub unsafe fn read32(&self, reg_offset: u16) -> u32 {
         match self.kind {
             BarKind::Io { addr } => unsafe {
                 let mut port: Port<u32> = Port::new(addr.0 + reg_offset);
@@ -167,7 +168,7 @@ impl Bar {
             },
             BarKind::Mem { .. } => {
                 let virt = self
-                    .virt
+                    .virt_addr()
                     .expect("read32 on Mem BAR before virt_addr was set");
 
                 let ptr = (virt.as_u64() + reg_offset as u64) as *const u32;

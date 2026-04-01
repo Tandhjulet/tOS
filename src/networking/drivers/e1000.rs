@@ -17,7 +17,7 @@ use crate::{
     networking::{MacAddr, RX_QUEUE, drivers::NetworkDriver},
     pci::{
         PciDevice,
-        bar::{AnyBAR, BAR},
+        bar::{Bar, BarKind},
     },
     println,
 };
@@ -186,7 +186,7 @@ impl Default for E1000RxDesc {
 
 pub struct E1000 {
     interrupt_line: u8,
-    bar0: AnyBAR,
+    device: Arc<Mutex<PciDevice>>,
     eeprom_exists: bool,
     mac: MacAddr,
     rx_descs_addr: VirtAddr,
@@ -196,27 +196,30 @@ pub struct E1000 {
 }
 
 impl E1000 {
-    pub fn new(guard: Arc<Mutex<PciDevice>>) -> Self {
-        let mut bar0 = PciDevice::get_bar(&guard, 0);
-        if let AnyBAR::Mem(ref mut bar) = bar0 {
-            let virt_addr = {
-                let phys_addr = bar.addr();
+    pub fn new(device: Arc<Mutex<PciDevice>>) -> Result<Self, &'static str> {
+        let binding = device.lock();
 
-                let size = bar.size() as u64;
+        let opt_bar0 = PciDevice::get_bar(&binding, 0);
+        let Some(bar0) = opt_bar0 else {
+            return Err("Could not find BAR0 for PCI!");
+        };
+
+        if let BarKind::Mem { addr, .. } = bar0.kind() {
+            let virt_addr = {
+                let phys_addr = addr.phys();
+
+                let size = bar0.size() as u64;
                 mmio::map_mmio(phys_addr, size)
             };
 
-            bar.set_virt_addr(virt_addr);
+            bar0.set_virt_addr(virt_addr);
         }
 
-        let irq = {
-            let mut device = guard.lock();
-            device.enable_bus_mastering();
-            device.interrupt_line
-        };
+        binding.enable_bus_mastering();
+        let irq = binding.interrupt_line();
 
-        Self {
-            bar0,
+        Ok(Self {
+            device: Arc::clone(&device),
             eeprom_exists: false,
             mac: MacAddr::zero(),
             tx_descs_addr: VirtAddr::zero(),
@@ -224,15 +227,33 @@ impl E1000 {
             rx_cur: 0,
             tx_cur: 0,
             interrupt_line: irq,
-        }
+        })
+    }
+
+    pub unsafe fn write(&self, reg_offset: u16, val: u32) {
+        let lock = self.device.lock();
+        let Some(bar) = lock.get_bar(0) else {
+            panic!("Failed to access BAR0!");
+        };
+
+        unsafe { bar.write32(reg_offset, val) };
+    }
+
+    pub unsafe fn read(&self, reg_offset: u16) -> u32 {
+        let lock = self.device.lock();
+        let Some(bar) = lock.get_bar(0) else {
+            panic!("Failed to access BAR0!");
+        };
+
+        unsafe { bar.read32(reg_offset) }
     }
 
     fn detect_eeprom(&mut self) -> bool {
-        unsafe { self.bar0.write_command(cfg::EEPROM, 0x1) };
+        unsafe { self.write(cfg::EEPROM, 0x1) };
 
         self.eeprom_exists = false;
         for _ in 0..1000 {
-            if unsafe { self.bar0.read_command(cfg::EEPROM) } & 0x10 > 0 {
+            if unsafe { self.read(cfg::EEPROM) } & 0x10 > 0 {
                 self.eeprom_exists = true;
                 break;
             }
@@ -245,21 +266,15 @@ impl E1000 {
         let mut tmp: u32;
 
         if self.eeprom_exists {
-            unsafe {
-                self.bar0
-                    .write_command(cfg::EEPROM, 1 | ((addr as u32) << 8))
-            };
+            unsafe { self.write(cfg::EEPROM, 1 | ((addr as u32) << 8)) };
             while {
-                tmp = unsafe { self.bar0.read_command(cfg::EEPROM) };
+                tmp = unsafe { self.read(cfg::EEPROM) };
                 tmp & (1 << 4) == 0
             } {}
         } else {
-            unsafe {
-                self.bar0
-                    .write_command(cfg::EEPROM, 1 | ((addr as u32) << 2))
-            };
+            unsafe { self.write(cfg::EEPROM, 1 | ((addr as u32) << 2)) };
             while {
-                tmp = unsafe { self.bar0.read_command(cfg::EEPROM) };
+                tmp = unsafe { self.read(cfg::EEPROM) };
                 tmp & (1 << 1) == 0
             } {}
         }
@@ -285,14 +300,20 @@ impl E1000 {
             return true;
         }
 
-        match &self.bar0 {
-            AnyBAR::IO(_) => {
+        let binding = self.device.lock();
+        let Some(bar0) = binding.get_bar(0) else {
+            panic!("Failed to access BAR0!");
+        };
+
+        match bar0.kind() {
+            BarKind::Io { .. } => {
                 println!("ERROR: Trying to read the MAC of IO BAR without an EEPROM!");
                 return false;
             }
-            AnyBAR::Mem(mem) => {
-                let mem_base_mac8: *const u8 = (mem.virt_addr().as_u64() + 0x5400) as *const u8;
-                let mem_base_mac32: *const u32 = (mem.virt_addr().as_u64() + 0x5400) as *const u32;
+            BarKind::Mem { .. } => {
+                let virt_addr = bar0.virt_addr().unwrap();
+                let mem_base_mac8: *const u8 = (virt_addr.as_u64() + 0x5400) as *const u8;
+                let mem_base_mac32: *const u32 = (virt_addr.as_u64() + 0x5400) as *const u32;
 
                 unsafe {
                     if (*mem_base_mac32) == 0 {
@@ -314,7 +335,7 @@ impl E1000 {
     pub fn clear_mta(&mut self) {
         for addr in cfg::REG_MTA {
             unsafe {
-                self.bar0.write_command(addr, 0x0);
+                self.write(addr, 0x0);
             };
         }
     }
@@ -322,12 +343,12 @@ impl E1000 {
     pub fn enable_interrupts(&mut self) {
         unsafe {
             // read to clear all reg bits
-            self.bar0.read_command(cfg::int::CAUSE_READ);
+            self.read(cfg::int::CAUSE_READ);
 
-            self.bar0.write_command(cfg::int::MASK_CLEAR, 0xFFFFFFFF);
+            self.write(cfg::int::MASK_CLEAR, 0xFFFFFFFF);
 
             let imask = cfg::int::ICR_RX0 | cfg::int::ICR_LSC | cfg::int::ICR_RXT0;
-            self.bar0.write_command(cfg::int::MASK, imask);
+            self.write(cfg::int::MASK, imask);
         }
     }
 
@@ -364,7 +385,7 @@ impl E1000 {
             self.rx_cur = (self.rx_cur + 1) % (cfg::NUM_RX_DESC as u16);
 
             unsafe {
-                self.bar0.write_command(cfg::rx::DESC_TAIL, old_cur as u32);
+                self.write(cfg::rx::DESC_TAIL, old_cur as u32);
             };
         }
 
@@ -392,16 +413,12 @@ impl E1000 {
         self.rx_descs_addr = rx_virt;
 
         unsafe {
-            self.bar0
-                .write_command(cfg::rx::DESC_LO, (rx_phys.as_u64() & 0xFFFF_FFFF) as u32);
-            self.bar0
-                .write_command(cfg::rx::DESC_HI, (rx_phys.as_u64() >> 32) as u32);
-            self.bar0
-                .write_command(cfg::rx::DESC_LEN, (BLOCK_SIZE) as u32);
+            self.write(cfg::rx::DESC_LO, (rx_phys.as_u64() & 0xFFFF_FFFF) as u32);
+            self.write(cfg::rx::DESC_HI, (rx_phys.as_u64() >> 32) as u32);
+            self.write(cfg::rx::DESC_LEN, (BLOCK_SIZE) as u32);
 
-            self.bar0.write_command(cfg::rx::DESC_HEAD, 0);
-            self.bar0
-                .write_command(cfg::rx::DESC_TAIL, (cfg::NUM_RX_DESC - 1) as u32);
+            self.write(cfg::rx::DESC_HEAD, 0);
+            self.write(cfg::rx::DESC_TAIL, (cfg::NUM_RX_DESC - 1) as u32);
 
             let flags = 0x0
                 | cfg::rx::ctrl::EN
@@ -414,7 +431,7 @@ impl E1000 {
                 | cfg::rx::ctrl::SECRC
                 | cfg::rx::ctrl::BSIZE_8192;
 
-            self.bar0.write_command(cfg::rx::CTRL, flags);
+            self.write(cfg::rx::CTRL, flags);
         };
     }
 
@@ -435,17 +452,14 @@ impl E1000 {
         self.tx_descs_addr = tx_virt;
 
         unsafe {
-            self.bar0
-                .write_command(cfg::tx::DESC_LO, (tx_phys.as_u64() & 0xFFFFFFFF) as u32);
-            self.bar0
-                .write_command(cfg::tx::DESC_HI, (tx_phys.as_u64() >> 32) as u32);
+            self.write(cfg::tx::DESC_LO, (tx_phys.as_u64() & 0xFFFFFFFF) as u32);
+            self.write(cfg::tx::DESC_HI, (tx_phys.as_u64() >> 32) as u32);
 
             let tx_desc_size = size_of::<E1000TxDesc>();
-            self.bar0
-                .write_command(cfg::tx::DESC_LEN, (cfg::NUM_TX_DESC * tx_desc_size) as u32);
+            self.write(cfg::tx::DESC_LEN, (cfg::NUM_TX_DESC * tx_desc_size) as u32);
 
-            self.bar0.write_command(cfg::tx::DESC_HEAD, 0);
-            self.bar0.write_command(cfg::tx::DESC_TAIL, 0);
+            self.write(cfg::tx::DESC_HEAD, 0);
+            self.write(cfg::tx::DESC_TAIL, 0);
 
             let flags = 0x0
                 | cfg::tx::ctrl::EN
@@ -453,10 +467,10 @@ impl E1000 {
                 | (0xF << cfg::tx::ctrl::CT_SHIFT)
                 | (64 << cfg::tx::ctrl::COLD_SHIFT)
                 | cfg::tx::ctrl::RTLC;
-            self.bar0.write_command(cfg::tx::CTRL, flags);
+            self.write(cfg::tx::CTRL, flags);
 
             // TODO: why?
-            self.bar0.write_command(0x0410, 0x0060200A);
+            self.write(0x0410, 0x0060200A);
         };
     }
 }
@@ -520,25 +534,22 @@ impl NetworkDriver for E1000 {
     }
 
     fn transmit(&mut self) {
-        unsafe {
-            self.bar0
-                .write_command(cfg::tx::DESC_TAIL, self.tx_cur as u32)
-        };
+        unsafe { self.write(cfg::tx::DESC_TAIL, self.tx_cur as u32) };
     }
 
     fn is_up(&mut self) -> bool {
-        let status = unsafe { self.bar0.read_command(cfg::STATUS) };
+        let status = unsafe { self.read(cfg::STATUS) };
         status & 0x2 != 0
     }
 
     fn handle_interrupt(&mut self, _: InterruptStackFrame) {
-        let status = unsafe { self.bar0.read_command(cfg::int::CAUSE_READ) };
+        let status = unsafe { self.read(cfg::int::CAUSE_READ) };
         if status & cfg::int::ICR_RXT0 > 0 {
             self.handle_receive();
         }
 
         let imask = cfg::int::ICR_RX0 | cfg::int::ICR_LSC | cfg::int::ICR_RXT0;
-        unsafe { self.bar0.write_command(cfg::int::MASK, imask) };
+        unsafe { self.write(cfg::int::MASK, imask) };
     }
 
     fn get_interrupt_line(&self) -> u8 {
