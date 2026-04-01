@@ -3,12 +3,12 @@ use core::net::Ipv4Addr;
 use alloc::{format, string::String};
 use num_enum::TryFromPrimitive;
 
+use crate::helpers;
 use crate::networking::protocols::arp::Arp;
 use crate::networking::protocols::dhcp::EnsureDHCPLease;
 use crate::networking::protocols::ethernet::{EtherType, Ethernet, EthernetHeader};
 use crate::networking::protocols::socket::SOCKET_TABLE;
 use crate::networking::{MacAddr, NETWORK_INFO, PacketBuf};
-use crate::{helpers, print, println};
 
 pub struct IP;
 
