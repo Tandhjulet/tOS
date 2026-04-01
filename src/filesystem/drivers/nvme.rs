@@ -1,19 +1,24 @@
 use alloc::sync::Arc;
 use spin::Mutex;
 
-use crate::{filesystem::drivers::BlockDevice, pci::PciDevice};
+use crate::{filesystem::drivers::StorageDevice, pci::PciDevice, println};
 
 pub struct NVMe {}
 
 impl NVMe {
     pub fn new(guard: Arc<Mutex<PciDevice>>) -> Self {
-        let mut bar0 = PciDevice::get_bar(&guard.lock(), 0);
+        let binding = guard.lock();
+        let Some(bar0) = PciDevice::get_bar(&binding, 0) else {
+            panic!("Could not find BAR0 for NVMe!");
+        };
+
+        println!("bar0: {:?}", bar0);
 
         Self {}
     }
 }
 
-impl BlockDevice for NVMe {
+impl StorageDevice for NVMe {
     fn read() {
         todo!()
     }

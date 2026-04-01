@@ -1,6 +1,6 @@
 pub mod nvme;
 
-pub trait BlockDevice {
+pub trait StorageDevice {
     fn read();
     fn write();
 }

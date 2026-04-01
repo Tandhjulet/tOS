@@ -55,31 +55,32 @@ impl NetworkInfo {
 }
 
 pub fn init() {
-    let mut lock = {
-        let mut devices = crate::pci::DEVICES.lock();
+    {
+        let device = {
+            let mut devices = crate::pci::DEVICES.lock();
 
-        // https://wiki.osdev.org/PCI#Class_Codes
-        let device = devices.iter_mut().find(|d| {
-            let d = d.lock();
-            d.class() == 0x2 && d.subclass() == 0x0
-        });
+            // https://wiki.osdev.org/PCI#Class_Codes
+            let device = devices.iter_mut().find(|d| {
+                let d = d.lock();
+                d.class() == 0x2 && d.subclass() == 0x0
+            });
 
-        let Some(device) = device else { return };
+            let Some(device) = device else { return };
 
-        let device: Arc<Mutex<crate::pci::PciDevice>> = Arc::clone(device);
-        drop(devices); // release the DEVICES lock before locking the individual device to avoid potential deadlocks
+            Arc::clone(device)
+        };
 
         // FIXME: make this dynamic
         let Ok(driver) = E1000::new(device) else {
-            panic!("Could not configure network driver!");
+            println!("Could not configure network driver!");
+            return;
         };
         *NETWORK_DRIVER.lock() = Some(Box::new(driver));
-
-        NETWORK_DRIVER.lock()
     };
 
     Arp::init();
 
+    let mut lock = NETWORK_DRIVER.lock();
     let driver = lock.as_mut().unwrap();
     driver.start();
 

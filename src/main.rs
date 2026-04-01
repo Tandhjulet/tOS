@@ -7,7 +7,7 @@
 use bootloader::{BootInfo, entry_point};
 use core::{net::Ipv4Addr, panic::PanicInfo};
 use tOS::{
-    allocator, interrupts,
+    allocator, filesystem, interrupts,
     networking::{
         self, network_rx_task, network_tx_task,
         protocols::{dhcp::DHCP, tcp::TcpConnection},
@@ -27,7 +27,8 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     tOS::init();
     allocator::init(&boot_info).expect("heap initialization failed");
 
-    networking::init();
+    // networking::init();
+    filesystem::init();
 
     interrupts::load_idt();
 
@@ -40,13 +41,13 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
 }
 
 async fn kernel_main_task() {
-    DHCP::discover().await.unwrap();
+    // DHCP::discover().await.unwrap();
 
-    let dst = Ipv4Addr::new(1, 1, 1, 1);
-    let mut tcp = TcpConnection::new(dst, 1234, 80).await;
-    tcp.open().await.unwrap();
+    // let dst = Ipv4Addr::new(1, 1, 1, 1);
+    // let mut tcp = TcpConnection::new(dst, 1234, 80).await;
+    // tcp.open().await.unwrap();
 
-    tcp.close().await.unwrap();
+    // tcp.close().await.unwrap();
 }
 
 /// This function is called on panic.
