@@ -3,12 +3,12 @@ use core::net::Ipv4Addr;
 use alloc::{format, string::String};
 use num_enum::TryFromPrimitive;
 
-use crate::helpers;
 use crate::networking::protocols::arp::Arp;
 use crate::networking::protocols::dhcp::EnsureDHCPLease;
 use crate::networking::protocols::ethernet::{EtherType, Ethernet, EthernetHeader};
 use crate::networking::protocols::socket::SOCKET_TABLE;
 use crate::networking::{MacAddr, NETWORK_INFO, PacketBuf};
+use crate::{helpers, print, println};
 
 pub struct IP;
 
@@ -23,8 +23,12 @@ impl IP {
         let ihl = 5;
 
         let data_len = buf.data().len();
+
         buf.write_header(ihl * 4, |wbuf| {
             IpHeader::write(src, dst, protocol, data_len, wbuf);
+
+            let checksum = IpHeader::calculate_send_checksum(wbuf);
+            wbuf[10..12].copy_from_slice(&checksum.to_be_bytes());
         });
 
         let mac = IP::get_route(dst).await?;
@@ -61,7 +65,7 @@ impl IP {
 
     // TODO: handle fragmentation
     pub fn handle_packet(mut buf: PacketBuf) -> Result<(), String> {
-        let ihl = (buf.peek(0) & 0x0F) as usize * 4;
+        let ihl = (buf.peek(0) & 0xF) as usize;
         let header = IpHeader(buf.read_header(IpHeader::len(ihl)));
 
         // Some protocols, like IGMP, offload the checksum validation to hardware
@@ -139,7 +143,7 @@ impl<'a> IpHeader<'a> {
     }
 
     pub fn calculate_headroom(options: usize) -> usize {
-        EthernetHeader::len() + options * 4
+        EthernetHeader::len() + (options + 5) * 4
     }
 
     pub fn len(ihl: usize) -> usize {
@@ -207,16 +211,21 @@ impl<'a> IpHeader<'a> {
         &self.0[20..]
     }
 
-    pub fn calculate_send_checksum(&self) -> u16 {
-        let sum = helpers::fold_sum(helpers::sum_byte_arr(&self.0));
-        !sum
+    pub fn header(&self) -> &[u8] {
+        &self.0[..20]
     }
 
     pub fn calculate_recv_checksum(&self) -> u16 {
+        helpers::fold_sum(
+            helpers::sum_byte_arr(&self.header()) + helpers::sum_byte_arr(&self.options()),
+        )
+    }
+
+    pub fn calculate_send_checksum(buf: &[u8]) -> u16 {
         let sum = helpers::fold_sum(
-            helpers::sum_byte_arr(&self.0[..10]) + helpers::sum_byte_arr(&self.0[12..]),
+            helpers::sum_byte_arr(&buf[..10]) + helpers::sum_byte_arr(&buf[12..]),
         );
-        sum
+        !sum
     }
 }
 

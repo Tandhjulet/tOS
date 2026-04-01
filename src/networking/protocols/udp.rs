@@ -59,7 +59,6 @@ pub struct UdpPacket {
 impl UdpPacket {
     pub fn new(conn: &UdpConnection, data: &[u8]) -> Self {
         let ip_opt_cnt = 0;
-        let buf_size = UdpPacket::header_len() + data.len();
         let mut buf = PacketBuf::new(
             UdpPacket::calculate_headroom(ip_opt_cnt),
             data.len(),
@@ -71,7 +70,9 @@ impl UdpPacket {
         buf.write_header(UdpPacket::header_len(), |buf| {
             buf[0..2].copy_from_slice(&conn.src_port.to_be_bytes());
             buf[2..4].copy_from_slice(&conn.dst_port.to_be_bytes());
-            buf[4..6].copy_from_slice(&(buf_size as u16).to_be_bytes());
+
+            let total_length = UdpPacket::header_len() + data.len();
+            buf[4..6].copy_from_slice(&(total_length as u16).to_be_bytes());
         });
 
         let mut packet = UdpPacket {

@@ -1,7 +1,10 @@
-use crate::networking::{
-    MacAddr, NETWORK_INFO, PacketBuf,
-    protocols::{arp::Arp, ip::IP},
-    queue_packet,
+use crate::{
+    networking::{
+        MacAddr, NETWORK_INFO, PacketBuf,
+        protocols::{arp::Arp, ip::IP},
+        queue_packet,
+    },
+    println,
 };
 use alloc::{format, string::String};
 use num_enum::TryFromPrimitive;
