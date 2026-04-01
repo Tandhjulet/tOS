@@ -215,7 +215,7 @@ impl TcpPacket {
     }
 
     pub fn raw(&self) -> &[u8] {
-        &self.buf.data()
+        self.buf.data()
     }
 
     pub fn ack_num(&self) -> u32 {
@@ -250,7 +250,7 @@ impl TcpPacket {
         u16::from_be_bytes([self.raw()[18], self.raw()[19]])
     }
 
-    pub fn parse(conn: &mut TcpConnection, data: PacketBuf) -> Self {
+    pub fn parse(conn: &TcpConnection, data: PacketBuf) -> Self {
         let packet = Self {
             // swap here as this is C->S traffic
             src: conn.dst_ip,
@@ -262,7 +262,7 @@ impl TcpPacket {
         packet
     }
 
-    pub fn validated(conn: &mut TcpConnection, data: PacketBuf) -> Result<Self, String> {
+    pub fn validated(conn: &TcpConnection, data: PacketBuf) -> Result<Self, String> {
         let packet = TcpPacket::parse(conn, data);
         packet.validate(conn)?;
 
@@ -278,8 +278,6 @@ impl TcpPacket {
     }
 
     pub fn validate(&self, conn: &TcpConnection) -> Result<(), String> {
-        println!("seq: {}, ack: {}", self.seq_num(), self.ack_num());
-
         let checksum = self.calculate_recv_checksum();
         if checksum != 0xFFFF {
             return Err(format!(

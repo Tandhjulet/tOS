@@ -87,6 +87,7 @@ pub fn init() {
 pub struct PacketBuf {
     buf: Vec<u8>,
     head: usize,
+    tail: usize,
 }
 
 impl PacketBuf {
@@ -94,9 +95,12 @@ impl PacketBuf {
         let mut buf = vec![0u8; headroom + data_len];
         writer(&mut buf[headroom..]);
 
+        let len = buf.len();
+
         Self {
             buf,
             head: headroom,
+            tail: len,
         }
     }
 
@@ -111,25 +115,53 @@ impl PacketBuf {
 
     pub fn patch_header(&mut self, offset: usize, data: &[u8]) {
         let start = self.head + offset;
-        self.buf[start..start + data.len()].copy_from_slice(data);
+        let idx = start + data.len();
+        self.assert_can_idx(idx);
+        self.buf[start..idx].copy_from_slice(data);
     }
 
     pub fn from(buf: Vec<u8>) -> Self {
-        Self { buf, head: 0 }
+        let len = buf.len();
+        Self {
+            buf,
+            head: 0,
+            tail: len,
+        }
     }
 
     pub fn read_header(&mut self, len: usize) -> &[u8] {
-        let header = &self.buf[self.head..self.head + len];
+        let idx = self.head + len;
+        self.assert_can_idx(idx);
+
+        let header = &self.buf[self.head..idx];
         self.head += len;
         header
     }
 
     pub fn peek(&self, offset: usize) -> u8 {
-        self.buf[self.head + offset]
+        let idx = self.head + offset;
+
+        self.assert_can_idx(idx);
+        self.buf[idx]
     }
 
     pub fn data(&self) -> &[u8] {
-        &self.buf[self.head..]
+        &self.buf[self.head..self.tail]
+    }
+
+    fn assert_can_idx(&self, idx: usize) {
+        assert!(
+            idx <= self.tail,
+            "cannot idx to buf at {}: 0 (START) -> {} (HEADER END) -> {} (DATA END) -> {} (BUFFER LEN)",
+            idx,
+            self.head,
+            self.tail,
+            self.buf.len()
+        );
+    }
+
+    pub fn trim_end(&mut self, amt: usize) {
+        self.tail -= amt;
     }
 }
 

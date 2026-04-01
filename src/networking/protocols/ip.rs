@@ -66,7 +66,8 @@ impl IP {
     // TODO: handle fragmentation
     pub fn handle_packet(mut buf: PacketBuf) -> Result<(), String> {
         let ihl = (buf.peek(0) & 0xF) as usize;
-        let header = IpHeader(buf.read_header(IpHeader::len(ihl)));
+        let header_len = IpHeader::len(ihl);
+        let header = IpHeader(buf.read_header(header_len));
 
         // Some protocols, like IGMP, offload the checksum validation to hardware
         let proto = header.protocol()?;
@@ -86,6 +87,11 @@ impl IP {
                 header.version()
             ));
         }
+
+        let payload_len = (header.total_length() as usize) - header_len;
+        let curr_len = buf.data().len();
+
+        buf.trim_end(curr_len - payload_len);
 
         match proto {
             IPProtocol::TCP | IPProtocol::UDP => {
@@ -166,7 +172,7 @@ impl<'a> IpHeader<'a> {
         self.0[1] & 0b11
     }
 
-    pub fn length(&self) -> u16 {
+    pub fn total_length(&self) -> u16 {
         u16::from_be_bytes([self.0[2], self.0[3]])
     }
 
