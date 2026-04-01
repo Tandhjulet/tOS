@@ -4,11 +4,11 @@ use alloc::borrow::ToOwned;
 use alloc::format;
 use alloc::string::String;
 
-use crate::helpers;
 use crate::networking::protocols::dhcp::EnsureDHCPLease;
 use crate::networking::protocols::ip::{IP, IPProtocol, IpHeader};
 use crate::networking::protocols::socket::{RecvPacket, SOCKET_TABLE};
 use crate::networking::{NETWORK_INFO, PacketBuf};
+use crate::{helpers, println};
 
 pub mod flag {
     #[allow(unused)]
@@ -278,8 +278,14 @@ impl TcpPacket {
     }
 
     pub fn validate(&self, conn: &TcpConnection) -> Result<(), String> {
-        if self.calculate_recv_checksum() != 0xFFFF {
-            return Err("Received checksum does not match calculated!".to_owned());
+        println!("seq: {}, ack: {}", self.seq_num(), self.ack_num());
+
+        let checksum = self.calculate_recv_checksum();
+        if checksum != 0xFFFF {
+            return Err(format!(
+                "Received checksum does not match calculated (got {})!",
+                checksum
+            ));
         }
 
         let ack_num = self.ack_num();

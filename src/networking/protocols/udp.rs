@@ -88,7 +88,7 @@ impl UdpPacket {
     }
 
     pub fn calculate_headroom(option_cnt: usize) -> usize {
-        UdpPacket::header_len() + IpHeader::calculate_headroom(option_cnt)
+        UdpPacket::header_len() + IpHeader::calculate_headroom(5 + option_cnt)
     }
 
     pub fn from(conn: &UdpConnection, data: PacketBuf) -> Self {

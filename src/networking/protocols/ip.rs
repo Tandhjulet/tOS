@@ -143,7 +143,7 @@ impl<'a> IpHeader<'a> {
     }
 
     pub fn calculate_headroom(options: usize) -> usize {
-        EthernetHeader::len() + (options + 5) * 4
+        EthernetHeader::len() + options * 4
     }
 
     pub fn len(ihl: usize) -> usize {
