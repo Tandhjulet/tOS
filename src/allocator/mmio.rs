@@ -9,7 +9,7 @@ use x86_64::{
 
 use crate::allocator::{FRAME_ALLOCATOR, MAPPER};
 
-static PAGE_SIZE: u64 = 0x1000;
+pub static PAGE_SIZE: u64 = 0x1000;
 pub static NEXT_PHYS: AtomicU64 = AtomicU64::new(0x1000_0000);
 pub static NEXT_MMIO: AtomicU64 = AtomicU64::new(0xFFFF_8000_0000_0000);
 

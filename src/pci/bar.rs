@@ -157,10 +157,10 @@ impl Bar {
         }
     }
 
-    pub unsafe fn write32(&self, reg_offset: u16, val: u32) {
+    pub unsafe fn write32(&self, reg_offset: u32, val: u32) {
         match self.kind {
             BarKind::Io { addr } => unsafe {
-                let mut port: Port<u32> = Port::new(addr.0 + reg_offset);
+                let mut port: Port<u32> = Port::new(addr.0 + (reg_offset as u16));
                 port.write(val);
             },
             BarKind::Mem { .. } => {
@@ -176,10 +176,10 @@ impl Bar {
         }
     }
 
-    pub unsafe fn read32(&self, reg_offset: u16) -> u32 {
+    pub unsafe fn read32(&self, reg_offset: u32) -> u32 {
         match self.kind {
             BarKind::Io { addr } => unsafe {
-                let mut port: Port<u32> = Port::new(addr.0 + reg_offset);
+                let mut port: Port<u32> = Port::new(addr.0 + (reg_offset as u16));
                 port.read()
             },
             BarKind::Mem { .. } => {
@@ -190,6 +190,21 @@ impl Bar {
                 let ptr = (virt.as_u64() + reg_offset as u64) as *const u32;
                 without_interrupts(|| unsafe { read_volatile(ptr) })
             }
+        }
+    }
+
+    pub unsafe fn write64(&self, reg_offset: u32, val: u64) {
+        unsafe {
+            self.write32(reg_offset, val as u32);
+            self.write32(reg_offset + 4, (val >> 32) as u32);
+        }
+    }
+
+    pub unsafe fn read64(&self, reg_offset: u32) -> u64 {
+        unsafe {
+            let lo = self.read32(reg_offset) as u64;
+            let hi = self.read32(reg_offset + 4) as u64;
+            (hi << 32) | lo
         }
     }
 }

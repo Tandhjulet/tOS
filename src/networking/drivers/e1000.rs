@@ -223,7 +223,7 @@ impl E1000 {
             panic!("Failed to access BAR0!");
         };
 
-        unsafe { bar.write32(reg_offset, val) };
+        unsafe { bar.write32(reg_offset as u32, val) };
     }
 
     pub unsafe fn read(&self, reg_offset: u16) -> u32 {
@@ -232,7 +232,7 @@ impl E1000 {
             panic!("Failed to access BAR0!");
         };
 
-        unsafe { bar.read32(reg_offset) }
+        unsafe { bar.read32(reg_offset as u32) }
     }
 
     fn detect_eeprom(&mut self) -> bool {
