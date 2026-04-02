@@ -5,13 +5,10 @@
 #![reexport_test_harness_main = "test_main"]
 
 use bootloader::{BootInfo, entry_point};
-use core::{net::Ipv4Addr, panic::PanicInfo};
+use core::panic::PanicInfo;
 use tOS::{
     allocator, filesystem, interrupts,
-    networking::{
-        self, network_rx_task, network_tx_task,
-        protocols::{dhcp::DHCP, tcp::TcpConnection},
-    },
+    networking::{self, network_rx_task, network_tx_task},
     println,
     task::{Task, executor::Executor, keyboard},
 };

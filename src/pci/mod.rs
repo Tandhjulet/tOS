@@ -8,7 +8,7 @@ use num_enum::TryFromPrimitive;
 use spin::Mutex;
 use x86_64::instructions::port::Port;
 
-use crate::pci::bar::Bar;
+use crate::{pci::bar::Bar, println};
 
 const CONFIG_ADDRESS: u16 = 0xCF8;
 const CONFIG_DATA: u16 = 0xCFC;
@@ -87,7 +87,7 @@ impl PciDevice {
         let class = (class_reg >> 24) as u8;
         let subclass = (class_reg >> 16) as u8;
 
-        let header_raw = (pci_read(bus, device, function, Self::OFF_CLASS) >> 16) as u8;
+        let header_raw = ((pci_read(bus, device, function, Self::OFF_CLASS) >> 16) as u8) & 0x7;
         let header_type = HeaderType::try_from(header_raw)
             .map_err(|err| format!("failed to map {:#x} to a header type", err.number))?;
 
@@ -252,7 +252,13 @@ fn check_function(bus: u8, device: u8, function: u8) -> Option<PciDevice> {
         return None;
     }
 
-    PciDevice::new(id, bus, device, function).ok()
+    match PciDevice::new(id, bus, device, function) {
+        Ok(dev) => Some(dev),
+        Err(msg) => {
+            println!("PCI ERROR: {}", msg);
+            None
+        }
+    }
 }
 
 fn get_addr(bus: u8, device: u8, func: u8, offset: u8) -> u32 {

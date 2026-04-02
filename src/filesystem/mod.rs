@@ -8,29 +8,23 @@ pub mod drivers;
 struct Ext2FileSystem {}
 
 pub fn init() {
-    let device = {
+    let devices = {
         let mut devices = crate::pci::DEVICES.lock();
 
         // https://wiki.osdev.org/PCI#Class_Codes
-        let mut storage_devices: Vec<Arc<Mutex<PciDevice>>> = Vec::new();
-        for device in devices.iter() {
-            let binding = device.lock();
-            if binding.class() != 0x1 {
-                continue;
-            }
+        let storage_devices = devices
+            .iter_mut()
+            .filter(|d| {
+                let d = d.lock();
+                d.class() == 0x1 && d.subclass() == 0x8
+            })
+            .map(|d| Arc::clone(d))
+            .collect::<Vec<Arc<Mutex<PciDevice>>>>();
 
-            storage_devices.push(Arc::clone(device));
-        }
-
-        println!("devices: {:?}", storage_devices);
-
-        let Some(device) = storage_devices.first() else {
-            println!("Failed finding a suitable storage device!");
-            return;
-        };
-
-        Arc::clone(device)
+        storage_devices
     };
 
-    let driver = NVMe::new(device);
+    for device in devices {
+        let driver = NVMe::new(device);
+    }
 }
