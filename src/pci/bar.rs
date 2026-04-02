@@ -8,7 +8,7 @@ use x86_64::{
     instructions::{interrupts::without_interrupts, port::Port},
 };
 
-use crate::pci::PciDevice;
+use crate::{allocator::mmio, pci::PciDevice};
 
 #[derive(Debug, Clone, Copy)]
 pub struct IoAddr(pub u16);
@@ -139,6 +139,22 @@ impl Bar {
             "Cannot set virt_addr for an I/O BAR"
         );
         self.virt.set(Some(addr));
+    }
+
+    pub fn map_mmio(&self) {
+        match self.kind() {
+            BarKind::Io { .. } => {}
+            BarKind::Mem { addr, .. } => {
+                let virt_addr = {
+                    let phys_addr = addr.phys();
+
+                    let size = self.size() as u64;
+                    mmio::map_mmio(phys_addr, size)
+                };
+
+                self.set_virt_addr(virt_addr);
+            }
+        }
     }
 
     pub unsafe fn write32(&self, reg_offset: u16, val: u32) {

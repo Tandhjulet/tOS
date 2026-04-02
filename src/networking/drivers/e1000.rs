@@ -12,7 +12,7 @@ use x86_64::{
 	* details regarding the implementation of the E1000 driver.
 	*/
 use crate::{
-    allocator::mmio::{self, alloc_dma_region},
+    allocator::mmio::alloc_dma_region,
     interrupts::{IDT, MIN_INTERRUPT, PICS},
     networking::{MacAddr, RX_QUEUE, drivers::NetworkDriver},
     pci::{PciDevice, bar::BarKind},
@@ -201,17 +201,7 @@ impl E1000 {
             return Err("Could not find BAR0 for PCI!");
         };
 
-        if let BarKind::Mem { addr, .. } = bar0.kind() {
-            let virt_addr = {
-                let phys_addr = addr.phys();
-
-                let size = bar0.size() as u64;
-                mmio::map_mmio(phys_addr, size)
-            };
-
-            bar0.set_virt_addr(virt_addr);
-        }
-
+        bar0.map_mmio();
         binding.enable_bus_mastering();
         let irq = binding.interrupt_line();
 
