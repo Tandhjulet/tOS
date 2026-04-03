@@ -1,16 +1,22 @@
+use core::{
+    convert::identity,
+    ptr::{read_volatile, write_volatile},
+};
+
 use alloc::sync::Arc;
 use spin::Mutex;
+use x86_64::{PhysAddr, VirtAddr};
 
 use crate::{
     allocator::mmio::{PAGE_SIZE, alloc_dma_region},
     filesystem::drivers::StorageDevice,
-    pci::{
-        PciDevice,
-        bar::{Bar, BarKind},
-    },
+    pci::{PciDevice, bar::Bar},
     println,
 };
 
+/**
+ * https://nvmexpress.org/wp-content/uploads/NVMe-NVM-Express-2.0a-2021.07.26-Ratified.pdf
+ */
 pub mod cfg {
     pub const CAP: u32 = 0x0;
     pub const VS: u32 = 0x08;
@@ -21,14 +27,22 @@ pub mod cfg {
     pub const AQA: u32 = 0x24;
     pub const ASQ: u32 = 0x28;
     pub const ACQ: u32 = 0x30;
+
+    // See figure 138
+    pub mod op {
+        pub const IDENTIFY: u32 = 0x06;
+    }
 }
 
 pub struct NVMe {
     device: Arc<Mutex<PciDevice>>,
     cap: ControllerCap,
 
+    identify: Option<IdentifyController>,
+
     adm_comp_queue: Option<Queue>,
     adm_subm_queue: Option<Queue>,
+    adm_buf: (VirtAddr, PhysAddr),
 }
 
 impl NVMe {
@@ -47,8 +61,10 @@ impl NVMe {
             Self {
                 device: Arc::clone(&device),
                 cap,
+                identify: None,
                 adm_comp_queue: None,
                 adm_subm_queue: None,
+                adm_buf: alloc_dma_region(PAGE_SIZE),
             }
         };
 
@@ -74,7 +90,12 @@ impl NVMe {
     }
 
     fn init(&mut self) {
-        while (unsafe { self.read_reg(cfg::CSTS) } & 0x1) != 0 {}
+        let mut cfg = self.get_configuration();
+        cfg.set_enabled(false);
+        unsafe { self.write_reg(cfg::CC, cfg.raw()) };
+
+        // wait for controller to disable
+        while (unsafe { self.read_reg(cfg::CSTS) } & 0x1) == 1 {}
 
         let (asq, acq) = self.create_admin_queues();
         self.adm_comp_queue = Some(acq);
@@ -86,16 +107,45 @@ impl NVMe {
         // since page_size = 4096 => MPS = 0
         let mps = 0;
 
-        cfg.set_css_from_cap(&self.cap)
+        let mut css = 0b000u8;
+        if self.cap.css_none() {
+            css = 0b111;
+        } else if self.cap.css_some() {
+            css = 0b110;
+        }
+
+        cfg.set_css(css)
             .set_ams(AmsType::RoundRobin)
             .set_mps(mps)
-            .set_enabled(true);
+            .set_enabled(false)
+            .set_iocqes(4) // Comp entry size: 2^4 = 16 bytes
+            .set_iosqes(6); // Subm entry size: 2^6 = 64 bytes
 
-        unsafe {
-            self.write_reg(cfg::CC, cfg.raw());
-        };
+        unsafe { self.write_reg(cfg::CC, cfg.raw()) };
 
-        println!("init!");
+        cfg.set_enabled(true);
+        unsafe { self.write_reg(cfg::CC, cfg.raw()) };
+
+        // wait for controller to enable
+        while (unsafe { self.read_reg(cfg::CSTS) } & 0x1) == 0 {}
+
+        println!("retrieving identity data structure");
+
+        let identify = self.identify_controller();
+        self.identify = Some(identify);
+
+        println!("VID: {}", identify.vid);
+    }
+
+    fn identify_controller(&mut self) -> IdentifyController {
+        let mut identify = SQEntry::default();
+        identify.cdw0 = cfg::op::IDENTIFY | (1 << 16);
+        identify.prp1 = self.adm_buf.1.as_u64();
+        identify.cdw10 = 0x1;
+
+        self.submit_admin_command(identify);
+        let identify = unsafe { *(self.adm_buf.0.as_ptr::<IdentifyController>()) };
+        identify
     }
 
     pub unsafe fn write_reg(&self, offset: u32, val: u32) {
@@ -127,23 +177,91 @@ impl NVMe {
         let mut asq = Queue::default();
         let mut acq = Queue::default();
 
-        let (_, asq_phys) = alloc_dma_region(PAGE_SIZE);
-        let (_, acq_phys) = alloc_dma_region(PAGE_SIZE);
+        let (asq_virt, asq_phys) = alloc_dma_region(PAGE_SIZE);
+        let (acq_virt, acq_phys) = alloc_dma_region(PAGE_SIZE);
 
-        asq.queue_addr = asq_phys.as_u64();
-        acq.queue_addr = acq_phys.as_u64();
+        asq.queue_phys = asq_phys.as_u64();
+        acq.queue_phys = acq_phys.as_u64();
+
+        asq.queue_virt = asq_virt.as_u64();
+        acq.queue_virt = acq_virt.as_u64();
+
         asq.size = 63;
         acq.size = 63;
+
+        asq.phase = 1;
+        acq.phase = 1;
 
         let aqa = ((acq.size as u32) << 16) | (asq.size as u32);
         unsafe { bar.write32(cfg::AQA, aqa) };
 
         unsafe {
-            bar.write64(cfg::ASQ, asq.queue_addr);
-            bar.write64(cfg::ACQ, acq.queue_addr);
+            bar.write64(cfg::ASQ, asq.queue_phys);
+            bar.write64(cfg::ACQ, acq.queue_phys);
         }
 
         (asq, acq)
+    }
+
+    fn submit_admin_command(&mut self, cmd: SQEntry) -> CQEntry {
+        let sq = self.adm_subm_queue.as_mut().unwrap();
+
+        let slot = sq.queue_virt + (sq.tail as u64 * size_of::<SQEntry>() as u64);
+        unsafe {
+            write_volatile(slot as *mut SQEntry, cmd);
+        };
+
+        sq.tail = (sq.tail + 1) % (sq.size as u16 + 1);
+        let tail = sq.tail;
+        let doorbell = self.sq_doorbell(0);
+        unsafe {
+            self.write_reg(doorbell, tail as u32);
+        };
+
+        self.poll_admin_completion()
+    }
+
+    fn poll_admin_completion(&mut self) -> CQEntry {
+        loop {
+            println!("polling...");
+            let (slot, phase) = {
+                let cq = self.adm_comp_queue.as_mut().unwrap();
+                let slot = cq.queue_virt + (cq.head as u64 * size_of::<CQEntry>() as u64);
+                (slot, cq.phase)
+            };
+
+            let entry = unsafe { read_volatile(slot as *const CQEntry) };
+
+            if entry.status & 0x1 == phase as u16 {
+                let doorbell = self.cq_doorbell(0);
+                let new_head = {
+                    let cq = self.adm_comp_queue.as_mut().unwrap();
+                    cq.head += 1;
+                    if cq.head > cq.size as u16 {
+                        cq.head = 0;
+                        cq.phase ^= 1; // flip phase on wraparound
+                    }
+
+                    cq.head
+                };
+
+                unsafe { self.write_reg(doorbell, new_head as u32) };
+
+                if (entry.status >> 1) != 0 {
+                    panic!("NVMe admin command failed: status={:#x}", entry.status >> 1);
+                }
+
+                return entry;
+            }
+        }
+    }
+
+    fn sq_doorbell(&self, queue_id: u16) -> u32 {
+        0x1000 + (2 * queue_id as u32) * (4 << self.cap.dstrd() as u32)
+    }
+
+    fn cq_doorbell(&self, queue_id: u16) -> u32 {
+        0x1000 + (2 * queue_id as u32 + 1) * (4 << self.cap.dstrd() as u32)
     }
 }
 
@@ -177,6 +295,16 @@ impl ControllerConfig {
 
     pub fn set_enabled(&mut self, en: bool) -> &mut Self {
         self.0 = (self.0 & !0x1) | (en as u32);
+        self
+    }
+
+    pub fn set_iosqes(&mut self, iosqes: u32) -> &mut Self {
+        self.0 = (self.0 & !(0x7 << 16)) | ((iosqes & 0x7) << 16);
+        self
+    }
+
+    pub fn set_iocqes(&mut self, iocqes: u32) -> &mut Self {
+        self.0 = (self.0 & !(0x7 << 20)) | ((iocqes & 0x7) << 20);
         self
     }
 
@@ -239,24 +367,52 @@ impl ControllerCap {
 
 #[derive(Default)]
 struct Queue {
-    queue_addr: u64,
+    queue_phys: u64,
+    queue_virt: u64,
     size: u64,
+
+    tail: u16,
+    head: u16,
+    phase: u8,
 }
 
+#[derive(Default)]
 #[repr(C)]
-struct SQueueEntry {
+pub struct SQEntry {
     pub cdw0: u32,
     pub nsid: u32,
     pub reserved: u64,
     pub mptr: u64,
-    pub dptr1: u64,
-    pub dptr2: u64,
+    pub prp1: u64,
+    pub prp2: u64,
     pub cdw10: u32,
     pub cdw11: u32,
     pub cdw12: u32,
     pub cdw13: u32,
     pub cdw14: u32,
     pub cdw15: u32,
+}
+
+#[repr(C)]
+pub struct CQEntry {
+    pub dw0: u32,
+    pub dw1: u32,
+    pub sq_head: u16,
+    pub sq_id: u16,
+    pub cid: u16,
+    pub status: u16,
+}
+
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub struct IdentifyController {
+    pub vid: u16,
+    pub ssvid: u16,
+    pub sn: [u8; 20],
+    pub mn: [u8; 40],
+    pub fr: [u8; 8],
+    pub rab: u8,
+    // see Figure 275 for the rest of the fields... there's a lot
 }
 
 impl StorageDevice for NVMe {
