@@ -15,7 +15,7 @@ use crate::{
 };
 
 /**
- * https://nvmexpress.org/wp-content/uploads/NVMe-NVM-Express-2.0a-2021.07.26-Ratified.pdf
+ * Base specification: https://nvmexpress.org/wp-content/uploads/NVMe-NVM-Express-2.0a-2021.07.26-Ratified.pdf
  */
 pub mod cfg {
     pub const CAP: u32 = 0x0;
@@ -28,24 +28,41 @@ pub mod cfg {
     pub const ASQ: u32 = 0x28;
     pub const ACQ: u32 = 0x30;
 
-    // See figure 138
+    // See figure 138 for at list of operations
     pub mod op {
         pub const IDENTIFY: u32 = 0x06;
+        pub const SET_FEATURES: u32 = 0x09;
+        pub const GET_FEATURES: u32 = 0x0A;
+
+        // For a list of Identify CNS values and reference sections, view figure 273
+        pub mod identify {
+            pub const CNS_NAMESPACE: u32 = 0x0;
+            pub const CNS_CONTROLLER: u32 = 0x1;
+            pub const CNS_SPECIFIC_NS: u32 = 0x5;
+            pub const CNS_SPECIFIC_CTRLR: u32 = 0x6;
+            pub const CNS_ACTIVE_NS_CMD_SET: u32 = 0x7;
+            pub const CNS_NAMESPACE_INDEPENDENT: u32 = 0x8;
+            pub const CNS_CMD_SET: u32 = 0x1C;
+        }
+
+        pub mod features {
+            pub const FID_SET_PROFILE: u32 = 0x19;
+        }
     }
 }
 
-pub struct NVMe {
+pub struct NVMeController {
     device: Arc<Mutex<PciDevice>>,
     cap: ControllerCap,
 
-    identify: Option<IdentifyController>,
+    identify_ctlr: Option<IdentifyController>,
 
     adm_comp_queue: Option<Queue>,
     adm_subm_queue: Option<Queue>,
     adm_buf: (VirtAddr, PhysAddr),
 }
 
-impl NVMe {
+impl NVMeController {
     pub fn new(device: Arc<Mutex<PciDevice>>) -> Self {
         let mut driver = {
             let binding = device.lock();
@@ -61,7 +78,7 @@ impl NVMe {
             Self {
                 device: Arc::clone(&device),
                 cap,
-                identify: None,
+                identify_ctlr: None,
                 adm_comp_queue: None,
                 adm_subm_queue: None,
                 adm_buf: alloc_dma_region(PAGE_SIZE),
@@ -131,21 +148,91 @@ impl NVMe {
 
         println!("retrieving identity data structure");
 
-        let identify = self.identify_controller();
-        self.identify = Some(identify);
+        let identify_ctrlr =
+            self.identify_read::<IdentifyController>(cfg::op::identify::CNS_CONTROLLER, |_| {});
+        self.identify_ctlr = Some(identify_ctrlr);
 
-        println!("VID: {}", identify.vid);
+        if cfg.css() == 0 {
+            // TODO
+        }
+        if self.cap.css_some() {
+            let cmd_set =
+                self.identify_read::<IdentifyCommandSet>(cfg::op::identify::CNS_CMD_SET, |_| {});
+            let selected_cmd_idx = cmd_set.first_valid().unwrap();
+
+            // Refer to section 5.27.1.21 for documentation regarding
+            // I/O Command Set Profile (FID: 0x19)
+            self.set_features(cfg::op::features::FID_SET_PROFILE, |features| {
+                features.cdw11 = selected_cmd_idx as u32;
+            });
+
+            for csi in cmd_set.csi_iter(selected_cmd_idx) {
+                let nsids = self.identify_read::<IdentifyNamespaceList>(
+                    cfg::op::identify::CNS_ACTIVE_NS_CMD_SET,
+                    |identify| {
+                        identify.nsid = 0;
+
+                        // See figure 271
+                        identify.cdw11 = (csi as u32) << 24;
+                    },
+                );
+
+                for &nsid in nsids.valid() {
+                    if IdentifyCommandSet::is_nvm_supported(csi as u64) {
+                        let ns_nvm = self.identify_read::<IdentifyNamespaceNvm>(
+                            cfg::op::identify::CNS_NAMESPACE,
+                            |cmd| {
+                                cmd.nsid = nsid;
+                            },
+                        );
+                    }
+
+                    self.identify(cfg::op::identify::CNS_SPECIFIC_NS, |cmd| {
+                        cmd.nsid = nsid;
+                        cmd.cdw11 = (csi as u32) << 24;
+                    });
+
+                    self.identify(cfg::op::identify::CNS_SPECIFIC_CTRLR, |cmd| {
+                        cmd.cdw11 = (csi as u32) << 24;
+                    });
+
+                    let ns = self.identify_read::<IdentifyNamespaceIndependent>(
+                        cfg::op::identify::CNS_NAMESPACE_INDEPENDENT,
+                        |cmd| {
+                            cmd.nsid = nsid;
+                        },
+                    );
+                }
+            }
+        }
     }
 
-    fn identify_controller(&mut self) -> IdentifyController {
+    fn identify_read<T: Copy>(&mut self, cns: u32, cmd: impl FnOnce(&mut SQEntry)) -> T {
+        self.identify(cns, cmd);
+        let identify = unsafe { *(self.adm_buf.0.as_ptr::<T>()) };
+        identify
+    }
+
+    fn identify(&mut self, cns: u32, cmd: impl FnOnce(&mut SQEntry)) {
         let mut identify = SQEntry::default();
         identify.cdw0 = cfg::op::IDENTIFY | (1 << 16);
         identify.prp1 = self.adm_buf.1.as_u64();
-        identify.cdw10 = 0x1;
+        identify.cdw10 = cns;
+
+        cmd(&mut identify);
 
         self.submit_admin_command(identify);
-        let identify = unsafe { *(self.adm_buf.0.as_ptr::<IdentifyController>()) };
-        identify
+    }
+
+    fn set_features(&mut self, fid: u32, cmd: impl FnOnce(&mut SQEntry)) {
+        let mut features = SQEntry::default();
+        features.cdw0 = cfg::op::SET_FEATURES | (1 << 16);
+        features.prp1 = self.adm_buf.1.as_u64();
+        features.cdw10 = fid;
+
+        cmd(&mut features);
+
+        self.submit_admin_command(features);
     }
 
     pub unsafe fn write_reg(&self, offset: u32, val: u32) {
@@ -223,7 +310,6 @@ impl NVMe {
 
     fn poll_admin_completion(&mut self) -> CQEntry {
         loop {
-            println!("polling...");
             let (slot, phase) = {
                 let cq = self.adm_comp_queue.as_mut().unwrap();
                 let slot = cq.queue_virt + (cq.head as u64 * size_of::<CQEntry>() as u64);
@@ -291,6 +377,10 @@ impl ControllerConfig {
     pub fn set_css(&mut self, css: u8) -> &mut Self {
         self.0 = self.0 & !(0x7 << 4) | ((css as u32 & 0x7) << 4);
         self
+    }
+
+    pub fn css(&mut self) -> u8 {
+        ((self.0 >> 4) & 0x7) as u8
     }
 
     pub fn set_enabled(&mut self, en: bool) -> &mut Self {
@@ -415,7 +505,111 @@ pub struct IdentifyController {
     // see Figure 275 for the rest of the fields... there's a lot
 }
 
-impl StorageDevice for NVMe {
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub struct IdentifyCommandSet {
+    pub iocsc: [u64; 512],
+}
+
+impl IdentifyCommandSet {
+    pub fn is_nvm_supported(cmd_set: u64) -> bool {
+        cmd_set & 0x1 == 1
+    }
+
+    pub fn is_kv_supported(cmd_set: u64) -> bool {
+        cmd_set & 0x2 == 1
+    }
+
+    pub fn is_zns_supported(cmd_set: u64) -> bool {
+        cmd_set & 0x4 == 1
+    }
+
+    pub fn first_valid(&self) -> Option<usize> {
+        self.iocsc.iter().position(|&e| Self::is_nvm_supported(e))
+    }
+
+    pub fn csi_iter(&self, idx: usize) -> impl Iterator<Item = u8> {
+        let entry = self.iocsc[idx];
+        (0u8..3).filter(move |&bit| entry & (1 << bit) == 1)
+    }
+}
+
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub struct IdentifyNamespaceList {
+    pub namespaces: [u32; 1024],
+}
+
+impl IdentifyNamespaceList {
+    pub fn valid(&self) -> impl Iterator<Item = &u32> {
+        self.namespaces.iter().take_while(|&&n| n != 0)
+    }
+}
+
+/**
+ * Refer to https://nvmexpress.org/wp-content/uploads/NVM-Express-NVM-Command-Set-Specification-Revision-1.1-2024.08.05-Ratified.pdf
+ * figure 114 for documentation regarding the implementation
+ */
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub struct IdentifyNamespaceNvm {
+    pub nsze: u64,             // size
+    pub ncap: u64,             // capacity
+    pub nuse: u64,             // utilization
+    pub nsfeat: u8,            // features
+    pub nlbaf: u8,             // number of LBA formats
+    pub flbas: u8,             // formatted LBA size
+    pub _reserved: [u8; 73],   // fields 0x1B - 0x63 are not yet implemented
+    pub lbaf: [LbaFormat; 64], // lba format support
+    pub _pad: [u8; 3740],
+}
+
+impl IdentifyNamespaceNvm {
+    pub fn active_lbaf_idx(&self) -> usize {
+        let low = (self.flbas & 0xF) as usize;
+        let high = (self.flbas >> 5 & 0x3) as usize;
+        (high << 4) | low
+    }
+
+    pub fn active_lbaf(&self) -> LbaFormat {
+        self.lbaf[self.active_lbaf_idx()]
+    }
+
+    pub fn block_size(&self) -> u64 {
+        1 << self.active_lbaf().lbads
+    }
+
+    pub fn size_bytes(&self) -> u64 {
+        self.nsze * self.block_size()
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+#[repr(C)]
+pub struct LbaFormat {
+    pub ms: u16,   // Metadata Size per LBA
+    pub lbads: u8, // LBA Data Size (reported as 2^self.lbads)
+    pub rp: u8,    // Relative Performance
+}
+
+// See Figure 280 in the base specification
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub struct IdentifyNamespaceIndependent {
+    pub nsfeat: u8,    // namespace features
+    pub nmic: u8,      // multi-path I/O and sharing capabilities
+    pub rescap: u8,    // reservation capabilities
+    pub fpi: u8,       // format progress indicator
+    pub anagrpid: u32, // ANA group identifier
+    pub nsattr: u8,    // namespace attributes
+    pub _reserved: u8,
+    pub nvmsetid: u16, // NVM set identifier
+    pub endgid: u16,   // endurance group identifier
+    pub nstat: u8,     // namespace status
+    pub _reserved2: [u8; 4081],
+}
+
+impl StorageDevice for NVMeController {
     fn read() {
         todo!()
     }
