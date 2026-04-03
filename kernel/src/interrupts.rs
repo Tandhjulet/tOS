@@ -1,4 +1,5 @@
 use crate::{gdt, hlt_loop, println};
+use bootloader_api::BootInfo;
 use pic8259::ChainedPics;
 use spin::Mutex;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
@@ -65,6 +66,8 @@ pub fn load_idt() {
     let idt_static: &'static InterruptDescriptorTable = unsafe { &*(&*idt as *const _) };
     idt_static.load();
 }
+
+pub fn setup_msi(boot_info: &'static BootInfo) {}
 
 extern "x86-interrupt" fn page_fault_handler(
     stack_frame: InterruptStackFrame,

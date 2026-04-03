@@ -2,7 +2,7 @@ pub mod memory;
 pub mod mmio;
 pub mod paging;
 
-use bootloader::BootInfo;
+use bootloader_api::BootInfo;
 use spin::Mutex;
 use x86_64::{
     VirtAddr,
@@ -20,11 +20,13 @@ pub static MAPPER: Mutex<Option<OffsetPageTable<'static>>> = Mutex::new(None);
 pub static FRAME_ALLOCATOR: Mutex<Option<BootInfoFrameAllocator>> = Mutex::new(None);
 
 pub fn init(boot_info: &'static BootInfo) -> Result<(), MapToError<Size4KiB>> {
-    let phys_mem_offset = VirtAddr::new(boot_info.physical_memory_offset);
+    let (offset, regions) = { (boot_info.physical_memory_offset, &boot_info.memory_regions) };
+
+    let phys_mem_offset = VirtAddr::new(*offset.as_ref().unwrap());
     let mapper = unsafe { memory::init(phys_mem_offset) };
     *MAPPER.lock() = Some(mapper);
 
-    let frame_allocator = unsafe { BootInfoFrameAllocator::init(&boot_info.memory_map) };
+    let frame_allocator = unsafe { BootInfoFrameAllocator::init(regions) };
     *FRAME_ALLOCATOR.lock() = Some(frame_allocator);
 
     init_heap()

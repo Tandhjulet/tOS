@@ -1,9 +1,6 @@
-use core::{
-    convert::identity,
-    ptr::{read_volatile, write_volatile},
-};
+use core::ptr::{read_volatile, write_volatile};
 
-use alloc::sync::Arc;
+use alloc::{sync::Arc, vec::Vec};
 use spin::Mutex;
 use x86_64::{PhysAddr, VirtAddr};
 
@@ -18,6 +15,8 @@ use crate::{
  * Base specification: https://nvmexpress.org/wp-content/uploads/NVMe-NVM-Express-2.0a-2021.07.26-Ratified.pdf
  */
 pub mod cfg {
+    pub const IO_QUEUES: u16 = 2;
+
     pub const CAP: u32 = 0x0;
     pub const VS: u32 = 0x08;
     pub const INTMS: u32 = 0x0C;
@@ -46,12 +45,25 @@ pub mod cfg {
         }
 
         pub mod features {
+            pub const FID_NUM_QUEUES: u32 = 0x07;
             pub const FID_SET_PROFILE: u32 = 0x19;
         }
     }
 }
 
-pub struct NVMeController {
+pub struct NvmeNamespace {
+    pub nsid: u32,
+    pub csi: u8,
+
+    // CNS 0x00 - only NVM-based command sets (NVM and Zoned NS)
+    // Contains LBA formats, cap, metadata cap
+    pub nvm_base: Option<IdentifyNamespaceNvm>,
+
+    // CNS 0x08 - command-set-indepedent fields
+    pub independent: IdentifyNamespaceIndependent,
+}
+
+pub struct NvmeController {
     device: Arc<Mutex<PciDevice>>,
     cap: ControllerCap,
 
@@ -60,9 +72,11 @@ pub struct NVMeController {
     adm_comp_queue: Option<Queue>,
     adm_subm_queue: Option<Queue>,
     adm_buf: (VirtAddr, PhysAddr),
+
+    namespaces: Vec<NvmeNamespace>,
 }
 
-impl NVMeController {
+impl NvmeController {
     pub fn new(device: Arc<Mutex<PciDevice>>) -> Self {
         let mut driver = {
             let binding = device.lock();
@@ -82,6 +96,7 @@ impl NVMeController {
                 adm_comp_queue: None,
                 adm_subm_queue: None,
                 adm_buf: alloc_dma_region(PAGE_SIZE),
+                namespaces: Vec::new(),
             }
         };
 
@@ -178,15 +193,20 @@ impl NVMeController {
                 );
 
                 for &nsid in nsids.valid() {
-                    if IdentifyCommandSet::is_nvm_supported(csi as u64) {
+                    let nvm_base = if Self::is_csi_nvm_based(csi) {
                         let ns_nvm = self.identify_read::<IdentifyNamespaceNvm>(
                             cfg::op::identify::CNS_NAMESPACE,
                             |cmd| {
                                 cmd.nsid = nsid;
                             },
                         );
-                    }
 
+                        Some(ns_nvm)
+                    } else {
+                        None
+                    };
+
+                    // TODO: store this; it's CSI-dependent and contains specific meta
                     self.identify(cfg::op::identify::CNS_SPECIFIC_NS, |cmd| {
                         cmd.nsid = nsid;
                         cmd.cdw11 = (csi as u32) << 24;
@@ -196,15 +216,39 @@ impl NVMeController {
                         cmd.cdw11 = (csi as u32) << 24;
                     });
 
-                    let ns = self.identify_read::<IdentifyNamespaceIndependent>(
+                    let independent = self.identify_read::<IdentifyNamespaceIndependent>(
                         cfg::op::identify::CNS_NAMESPACE_INDEPENDENT,
                         |cmd| {
                             cmd.nsid = nsid;
                         },
                     );
+
+                    self.namespaces.push(NvmeNamespace {
+                        nsid,
+                        csi,
+                        nvm_base,
+                        independent,
+                    });
                 }
             }
         }
+
+        let io_queue_count_raw = self.set_features(cfg::op::features::FID_NUM_QUEUES, |cmd| {
+            cmd.cdw11 = ((cfg::IO_QUEUES as u32) << 16) | cfg::IO_QUEUES as u32;
+        });
+
+        let io_comp_queues = (io_queue_count_raw.dw0 >> 16) as u16;
+        let io_subm_queues = io_queue_count_raw.dw0 as u16;
+        if io_comp_queues != io_subm_queues {
+            println!(
+                "WARNING: using inequal IO queues (comp queues: {}, submission queues: {})",
+                io_comp_queues, io_subm_queues
+            );
+        }
+    }
+
+    fn is_csi_nvm_based(csi: u8) -> bool {
+        matches!(csi, 0x00 | 0x03)
     }
 
     fn identify_read<T: Copy>(&mut self, cns: u32, cmd: impl FnOnce(&mut SQEntry)) -> T {
@@ -213,7 +257,7 @@ impl NVMeController {
         identify
     }
 
-    fn identify(&mut self, cns: u32, cmd: impl FnOnce(&mut SQEntry)) {
+    fn identify(&mut self, cns: u32, cmd: impl FnOnce(&mut SQEntry)) -> CQEntry {
         let mut identify = SQEntry::default();
         identify.cdw0 = cfg::op::IDENTIFY | (1 << 16);
         identify.prp1 = self.adm_buf.1.as_u64();
@@ -221,10 +265,10 @@ impl NVMeController {
 
         cmd(&mut identify);
 
-        self.submit_admin_command(identify);
+        self.submit_admin_command(identify)
     }
 
-    fn set_features(&mut self, fid: u32, cmd: impl FnOnce(&mut SQEntry)) {
+    fn set_features(&mut self, fid: u32, cmd: impl FnOnce(&mut SQEntry)) -> CQEntry {
         let mut features = SQEntry::default();
         features.cdw0 = cfg::op::SET_FEATURES | (1 << 16);
         features.prp1 = self.adm_buf.1.as_u64();
@@ -232,7 +276,7 @@ impl NVMeController {
 
         cmd(&mut features);
 
-        self.submit_admin_command(features);
+        self.submit_admin_command(features)
     }
 
     pub unsafe fn write_reg(&self, offset: u32, val: u32) {
@@ -609,7 +653,7 @@ pub struct IdentifyNamespaceIndependent {
     pub _reserved2: [u8; 4081],
 }
 
-impl StorageDevice for NVMeController {
+impl StorageDevice for NvmeController {
     fn read() {
         todo!()
     }

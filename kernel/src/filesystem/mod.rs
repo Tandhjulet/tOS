@@ -1,7 +1,7 @@
 use alloc::{sync::Arc, vec::Vec};
 use spin::Mutex;
 
-use crate::{filesystem::drivers::nvme::NVMeController, pci::PciDevice, println};
+use crate::{filesystem::drivers::nvme::NvmeController, pci::PciDevice, println};
 
 pub mod drivers;
 
@@ -25,6 +25,6 @@ pub fn init() {
     };
 
     for device in devices {
-        let driver = NVMeController::new(device);
+        let driver = NvmeController::new(device);
     }
 }

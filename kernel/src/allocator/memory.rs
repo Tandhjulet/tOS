@@ -1,4 +1,4 @@
-use bootloader::bootinfo::{MemoryMap, MemoryRegionType};
+use bootloader_api::info::{MemoryRegionKind, MemoryRegions};
 use x86_64::{
     PhysAddr, VirtAddr,
     structures::paging::{FrameAllocator, OffsetPageTable, PageTable, PhysFrame, Size4KiB},
@@ -24,14 +24,14 @@ pub unsafe fn init(phys_mem_offset: VirtAddr) -> OffsetPageTable<'static> {
 }
 
 pub struct BootInfoFrameAllocator {
-    memory_map: &'static MemoryMap,
+    memory_map: &'static MemoryRegions,
     next: usize,
 }
 
 // TODO: rewrite to use a buddy allocator for
 // contiguity and deallocation
 impl BootInfoFrameAllocator {
-    pub unsafe fn init(memory_map: &'static MemoryMap) -> Self {
+    pub unsafe fn init(memory_map: &'static MemoryRegions) -> Self {
         BootInfoFrameAllocator {
             memory_map,
             next: 0,
@@ -40,9 +40,9 @@ impl BootInfoFrameAllocator {
 
     fn usable_frames(&self) -> impl Iterator<Item = PhysFrame> {
         let regions = self.memory_map.iter();
-        let usable_regions = regions.filter(|r| r.region_type == MemoryRegionType::Usable);
+        let usable_regions = regions.filter(|r| r.kind == MemoryRegionKind::Usable);
 
-        let addr_ranges = usable_regions.map(|r| r.range.start_addr()..r.range.end_addr());
+        let addr_ranges = usable_regions.map(|r| r.start..r.end);
         let frame_addresses = addr_ranges.flat_map(|r| r.step_by(4096));
 
         frame_addresses.map(|addr| PhysFrame::containing_address(PhysAddr::new(addr)))

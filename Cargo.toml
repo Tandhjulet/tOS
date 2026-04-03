@@ -1,76 +1,21 @@
+[workspace]
+resolver = "3"
+members = ["kernel"]
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+
 [package]
-name = "tOS"
+name = "tos"
 version = "0.1.0"
 edition = "2024"
 
-[[test]]
-name = "should_panic"
-harness = false
-
-[[test]]
-name = "stack_overflow"
-harness = false
-
 [dependencies]
-linked_list_allocator = "0.9.0"
-bootloader = { version = "0.9", features = ["map_physical_memory"] }
-volatile = "0.2.6"
-spin = "0.5.2"
-x86_64 = "0.14.2"
-uart_16550 = "0.2.0"
-pic8259 = "0.10.1"
-pc-keyboard = "0.7.0"
-num_enum = { version = "0.7.6", default-features = false }
-bitflags = { version = "2.11.0", default-features = false }
+ovmf-prebuilt = "0.2.4"
 
-[dependencies.crossbeam-queue]
-version = "0.3.11"
-default-features = false
-features = ["alloc"]
-
-[dependencies.conquer-once]
-version = "0.2.0"
-default-features = false
-
-[dependencies.lazy_static]
-version = "1.0"
-features = ["spin_no_std"]
-
-[dependencies.futures-util]
-version = "0.3.4"
-default-features = false
-features = ["alloc"]
-
-[[bin]]
-name = "tOS"
-test = true
-bench = false
-
-
-[package.metadata.bootimage]
-test-args = [
-	"-device",
-	"isa-debug-exit,iobase=0xf4,iosize=0x04",
-	"-serial",
-	"stdio",
-	"-display",
-	"none",
-]
-run-args = [
-	"-netdev",
-	"user,id=net0",
-	"-object",
-	"filter-dump,id=f1,netdev=net0,file=/tmp/dhcp.pcap",
-	"-device",
-	"e1000,netdev=net0",
-
-	"-drive",
-	"file=../nvm.img,if=none,id=nvm,format=raw",
-	"-device",
-	"nvme,serial=deadbeef,drive=nvm",
-	"-snapshot",
-
-	"-monitor",
-	"stdio",
-]
-test-success-exit-code = 33 # (0x10 << 1) | 1
+[build-dependencies]
+kernel = { path = "kernel", artifact = "bin", target = "x86_64-unknown-none" }
+bootloader = "0.11.12"

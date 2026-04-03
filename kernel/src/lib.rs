@@ -6,6 +6,7 @@
 #![reexport_test_harness_main = "test_main"]
 
 pub mod allocator;
+pub mod arch;
 pub mod filesystem;
 pub mod gdt;
 pub mod helpers;
@@ -73,25 +74,6 @@ pub fn exit_qemu(exit_code: QemuExitCode) {
         let mut port = Port::new(0xf4);
         port.write(exit_code as u32);
     }
-}
-
-#[cfg(test)]
-use bootloader::{BootInfo, entry_point};
-
-#[cfg(test)]
-entry_point!(test_kernel_main);
-
-#[cfg(test)]
-fn test_kernel_main(_bott_info: &'static BootInfo) -> ! {
-    init();
-    test_main();
-    hlt_loop();
-}
-
-#[cfg(test)]
-#[panic_handler]
-fn panic(info: &PanicInfo) -> ! {
-    test_panic_handler(info)
 }
 
 pub fn hlt_loop() -> ! {
