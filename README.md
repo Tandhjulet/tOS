@@ -17,11 +17,11 @@ Currently, the network stack supports TCP/IP and UDP/IP. It has a very basic imp
 
 ```
 [mads@archlinux tOS]$ rustc -vV
-rustc 1.87.0-nightly (3ea711f17 2025-03-09)
+rustc 1.96.0-nightly (55e86c996 2026-04-02)
 binary: rustc
-commit-hash: 3ea711f17e3946ac3f4df11691584e2c56b4b0cf
-commit-date: 2025-03-09
+commit-hash: 55e86c996809902e8bbad512cfb4d2c18be446d9
+commit-date: 2026-04-02
 host: x86_64-unknown-linux-gnu
-release: 1.87.0-nightly
-LLVM version: 20.1.0
+release: 1.96.0-nightly
+LLVM version: 22.1.2
 ```
