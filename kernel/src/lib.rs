@@ -20,7 +20,7 @@ pub mod task;
 
 use core::panic::PanicInfo;
 
-use bootloader_api::info::{FrameBuffer, FrameBufferInfo};
+use bootloader_api::info::FrameBufferInfo;
 
 use crate::logger::LockedLogger;
 

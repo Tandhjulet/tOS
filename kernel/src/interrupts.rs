@@ -67,7 +67,7 @@ pub fn load_idt() {
     idt_static.load();
 }
 
-pub fn setup_msi(boot_info: &'static BootInfo) {}
+pub fn setup_msi(_boot_info: &'static BootInfo) {}
 
 extern "x86-interrupt" fn page_fault_handler(
     stack_frame: InterruptStackFrame,
