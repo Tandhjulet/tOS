@@ -3,9 +3,9 @@ use core::net::Ipv4Addr;
 use alloc::{string::String, vec::Vec};
 
 use crate::helpers;
-use crate::networking::PacketBuf;
-use crate::networking::protocols::ip::{IP, IPProtocol, IpHeader};
-use crate::networking::protocols::socket::{RecvPacket, SOCKET_TABLE};
+use crate::io::net::PacketBuf;
+use crate::io::net::protocols::ip::{IP, IPProtocol, IpHeader};
+use crate::io::net::protocols::socket::{RecvPacket, SOCKET_TABLE};
 
 pub struct UdpConnection {
     src_ip: Ipv4Addr,

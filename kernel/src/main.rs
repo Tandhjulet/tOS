@@ -7,8 +7,8 @@
 use bootloader_api::{BootInfo, BootloaderConfig, config::Mapping, entry_point};
 use kernel::{
     allocator, filesystem, init_logger, interrupts,
-    networking::{network_rx_task, network_tx_task},
-    task::{Task, executor::Executor, keyboard},
+    io::net::{network_rx_task, network_tx_task},
+    sys::task::{Task, executor::Executor, keyboard},
 };
 
 extern crate alloc;

@@ -3,7 +3,7 @@ use x86_64::{instructions::interrupts::without_interrupts, structures::idt::Inte
 
 use crate::{
     interrupts::{MIN_INTERRUPT, PICS},
-    networking::{MacAddr, NETWORK_DRIVER, RX_WAKER},
+    io::net::{MacAddr, NETWORK_DRIVER, RX_WAKER},
 };
 
 pub mod e1000;

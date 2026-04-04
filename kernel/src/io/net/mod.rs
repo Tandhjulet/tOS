@@ -8,11 +8,11 @@ use alloc::{boxed::Box, collections::vec_deque::VecDeque, sync::Arc, vec::Vec};
 use futures_util::task::AtomicWaker;
 use spin::{Mutex, RwLock};
 
-use crate::networking::drivers::NetworkDriver;
-use crate::networking::drivers::e1000::E1000;
-use crate::networking::protocols::ethernet::Ethernet;
+use crate::io::net::drivers::NetworkDriver;
+use crate::io::net::drivers::e1000::E1000;
+use crate::io::net::protocols::ethernet::Ethernet;
 use crate::{
-    networking::protocols::{arp::Arp, dhcp::DhcpLease},
+    io::net::protocols::{arp::Arp, dhcp::DhcpLease},
     println,
 };
 

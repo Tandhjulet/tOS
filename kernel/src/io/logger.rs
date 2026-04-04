@@ -3,7 +3,7 @@ use conquer_once::spin::OnceCell;
 use core::fmt::Write;
 use spin::Mutex;
 
-use crate::frame_buffer::FrameBufferWriter;
+use crate::io::frame_buffer::FrameBufferWriter;
 
 pub static LOGGER: OnceCell<LockedLogger> = OnceCell::uninit();
 

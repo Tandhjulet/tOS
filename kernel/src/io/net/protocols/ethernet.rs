@@ -1,4 +1,4 @@
-use crate::networking::{
+use crate::io::net::{
     MacAddr, NETWORK_INFO, PacketBuf,
     protocols::{arp::Arp, ip::IP},
     queue_packet,

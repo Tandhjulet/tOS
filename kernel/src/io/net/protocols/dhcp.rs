@@ -6,9 +6,9 @@ use alloc::{format, vec};
 use num_enum::TryFromPrimitive;
 use spin::Mutex;
 
-use crate::networking::NETWORK_INFO;
-use crate::networking::protocols::ethernet::HardwareType;
-use crate::networking::{MacAddr, protocols::udp::UdpConnection};
+use crate::io::net::NETWORK_INFO;
+use crate::io::net::protocols::ethernet::HardwareType;
+use crate::io::net::{MacAddr, protocols::udp::UdpConnection};
 use crate::println;
 
 pub const DHCP_SERVER_PORT: u16 = 67;

@@ -6,28 +6,23 @@
 #![reexport_test_harness_main = "test_main"]
 
 pub mod allocator;
-pub mod arch;
 pub mod filesystem;
-pub mod frame_buffer;
-pub mod gdt;
 pub mod helpers;
 pub mod interrupts;
-pub mod logger;
-pub mod networking;
+pub mod io;
 pub mod pci;
-pub mod serial;
-pub mod task;
+pub mod sys;
 
 use core::panic::PanicInfo;
 
 use bootloader_api::info::FrameBufferInfo;
 
-use crate::logger::LockedLogger;
+use crate::io::logger::LockedLogger;
 
 extern crate alloc;
 
 pub fn init() {
-    gdt::init();
+    sys::gdt::init();
 
     interrupts::init_idt();
     interrupts::init_pics();
@@ -36,7 +31,7 @@ pub fn init() {
 }
 
 pub fn init_logger(buf: &'static mut [u8], info: FrameBufferInfo) {
-    let logger = logger::LOGGER.get_or_init(move || LockedLogger::new(buf, info));
+    let logger = io::logger::LOGGER.get_or_init(move || LockedLogger::new(buf, info));
     log::set_logger(logger).expect("logger already set!");
     log::set_max_level(log::LevelFilter::Trace);
 }

@@ -14,7 +14,7 @@ use x86_64::{
 use crate::{
     allocator::mmio::alloc_dma_region,
     interrupts::{IDT, MIN_INTERRUPT, PICS},
-    networking::{MacAddr, RX_QUEUE, drivers::NetworkDriver},
+    io::net::{MacAddr, RX_QUEUE, drivers::NetworkDriver},
     pci::{PciDevice, bar::BarKind},
     println,
 };

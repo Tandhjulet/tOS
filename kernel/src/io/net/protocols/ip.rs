@@ -4,11 +4,11 @@ use alloc::{format, string::String};
 use num_enum::TryFromPrimitive;
 
 use crate::helpers;
-use crate::networking::protocols::arp::Arp;
-use crate::networking::protocols::dhcp::EnsureDHCPLease;
-use crate::networking::protocols::ethernet::{EtherType, Ethernet, EthernetHeader};
-use crate::networking::protocols::socket::SOCKET_TABLE;
-use crate::networking::{MacAddr, NETWORK_INFO, PacketBuf};
+use crate::io::net::protocols::arp::Arp;
+use crate::io::net::protocols::dhcp::EnsureDHCPLease;
+use crate::io::net::protocols::ethernet::{EtherType, Ethernet, EthernetHeader};
+use crate::io::net::protocols::socket::SOCKET_TABLE;
+use crate::io::net::{MacAddr, NETWORK_INFO, PacketBuf};
 
 pub struct IP;
 

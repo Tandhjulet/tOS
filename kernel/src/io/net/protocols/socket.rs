@@ -3,7 +3,7 @@ use core::task::{Context, Poll, Waker};
 use alloc::{collections::vec_deque::VecDeque, vec::Vec};
 use spin::Mutex;
 
-use crate::networking::{PacketBuf, protocols::ip::IPProtocol};
+use crate::io::net::{PacketBuf, protocols::ip::IPProtocol};
 
 pub static SOCKET_TABLE: Mutex<SocketTable> = Mutex::new(SocketTable {
     entries: Vec::new(),

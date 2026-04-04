@@ -5,7 +5,7 @@ use futures_util::task::AtomicWaker;
 use num_enum::TryFromPrimitive;
 use spin::Mutex;
 
-use crate::networking::{
+use crate::io::net::{
     MacAddr, NETWORK_INFO, PacketBuf,
     protocols::ethernet::{EtherType, Ethernet, EthernetHeader, HardwareType},
 };
@@ -16,7 +16,7 @@ static PENDING_ARP: Mutex<BTreeMap<Ipv4Addr, Arc<AtomicWaker>>> = Mutex::new(BTr
 pub struct Arp;
 
 impl Arp {
-    pub(in crate::networking) fn init() {
+    pub(in crate::io::net) fn init() {
         ARP_CACHE
             .lock()
             .insert(Ipv4Addr::new(255, 255, 255, 255), MacAddr::broadcast());
