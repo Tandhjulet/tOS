@@ -20,7 +20,7 @@ pub mod task;
 
 use core::panic::PanicInfo;
 
-use bootloader_api::info::FrameBufferInfo;
+use bootloader_api::info::{FrameBuffer, FrameBufferInfo};
 
 use crate::logger::LockedLogger;
 
@@ -35,8 +35,8 @@ pub fn init() {
     x86_64::instructions::interrupts::enable();
 }
 
-pub fn init_logger(frame_buffer: &'static mut [u8], info: FrameBufferInfo) {
-    let logger = logger::LOGGER.get_or_init(move || LockedLogger::new(frame_buffer, info));
+pub fn init_logger(buf: &'static mut [u8], info: FrameBufferInfo) {
+    let logger = logger::LOGGER.get_or_init(move || LockedLogger::new(buf, info));
     log::set_logger(logger).expect("logger already set!");
     log::set_max_level(log::LevelFilter::Trace);
 }

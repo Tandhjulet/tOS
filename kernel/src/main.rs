@@ -6,7 +6,7 @@
 
 use bootloader_api::{BootInfo, BootloaderConfig, config::Mapping, entry_point};
 use kernel::{
-    filesystem, init_logger, interrupts,
+    allocator, filesystem, init_logger, interrupts,
     networking::{network_rx_task, network_tx_task},
     task::{Task, executor::Executor, keyboard},
 };
@@ -22,13 +22,10 @@ pub static BOOTLOADER_CONFIG: BootloaderConfig = {
 entry_point!(kernel_main, config = &BOOTLOADER_CONFIG);
 
 fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
-    let frame_buffer = boot_info.framebuffer.as_mut().unwrap();
-    let info = frame_buffer.info();
-    let buf = frame_buffer.buffer_mut();
-    init_logger(buf, info);
+    init_framebuffer(boot_info);
 
     kernel::init();
-    // allocator::init(boot_info).expect("heap initialization failed");
+    allocator::init(boot_info).expect("heap initialization failed");
 
     // networking::init();
     filesystem::init();
@@ -51,6 +48,18 @@ async fn kernel_main_task() {
     // tcp.open().await.unwrap();
 
     // tcp.close().await.unwrap();
+}
+
+fn init_framebuffer(boot_info: *mut BootInfo) {
+    // SAFETY: never access boot_info.framebuffer after this method returns
+    let buf: &'static mut [u8] = unsafe {
+        let fb = (*boot_info).framebuffer.as_mut().unwrap();
+        let buf = fb.buffer_mut();
+        core::slice::from_raw_parts_mut(buf.as_mut_ptr(), buf.len())
+    };
+    let info = unsafe { (*boot_info).framebuffer.as_ref().unwrap().info() };
+
+    init_logger(buf, info);
 }
 
 #[cfg(not(test))]
