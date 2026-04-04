@@ -1,7 +1,7 @@
 use alloc::{sync::Arc, vec::Vec};
 use spin::Mutex;
 
-use crate::{filesystem::drivers::nvme::NvmeController, pci::PciDevice, println};
+use crate::{filesystem::drivers::nvme::NvmeController, io::pci::PciDevice};
 
 pub mod drivers;
 
@@ -9,7 +9,7 @@ struct Ext2FileSystem {}
 
 pub fn init() {
     let devices = {
-        let mut devices = crate::pci::DEVICES.lock();
+        let mut devices = crate::io::pci::DEVICES.lock();
 
         // https://wiki.osdev.org/PCI#Class_Codes
         let storage_devices = devices

@@ -57,7 +57,7 @@ impl NetworkInfo {
 pub fn init() {
     {
         let device = {
-            let mut devices = crate::pci::DEVICES.lock();
+            let mut devices = crate::io::pci::DEVICES.lock();
 
             // https://wiki.osdev.org/PCI#Class_Codes
             let device = devices.iter_mut().find(|d| {

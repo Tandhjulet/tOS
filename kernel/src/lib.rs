@@ -8,16 +8,14 @@
 pub mod allocator;
 pub mod filesystem;
 pub mod helpers;
-pub mod interrupts;
 pub mod io;
-pub mod pci;
 pub mod sys;
 
 use core::panic::PanicInfo;
 
 use bootloader_api::info::FrameBufferInfo;
 
-use crate::io::logger::LockedLogger;
+use crate::{io::logger::LockedLogger, sys::interrupts};
 
 extern crate alloc;
 

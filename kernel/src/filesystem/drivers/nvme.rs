@@ -7,7 +7,7 @@ use x86_64::{PhysAddr, VirtAddr};
 use crate::{
     allocator::mmio::{PAGE_SIZE, alloc_dma_region},
     filesystem::drivers::StorageDevice,
-    pci::{PciDevice, bar::Bar},
+    io::pci::{PciDevice, bar::Bar},
     println,
 };
 

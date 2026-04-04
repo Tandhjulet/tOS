@@ -8,7 +8,7 @@ use x86_64::{
     instructions::{interrupts::without_interrupts, port::Port},
 };
 
-use crate::{allocator::mmio, pci::PciDevice};
+use crate::{allocator::mmio, io::pci::PciDevice};
 
 #[derive(Debug, Clone, Copy)]
 pub struct IoAddr(pub u16);

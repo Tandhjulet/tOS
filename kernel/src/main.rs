@@ -6,8 +6,9 @@
 
 use bootloader_api::{BootInfo, BootloaderConfig, config::Mapping, entry_point};
 use kernel::{
-    allocator, filesystem, init_logger, interrupts,
+    allocator, filesystem, init_logger,
     io::net::{network_rx_task, network_tx_task},
+    sys::interrupts,
     sys::task::{Task, executor::Executor, keyboard},
 };
 

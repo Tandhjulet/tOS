@@ -8,7 +8,7 @@ use num_enum::TryFromPrimitive;
 use spin::Mutex;
 use x86_64::instructions::port::Port;
 
-use crate::{pci::bar::Bar, println};
+use crate::{io::pci::bar::Bar, println};
 
 const CONFIG_ADDRESS: u16 = 0xCF8;
 const CONFIG_DATA: u16 = 0xCFC;
