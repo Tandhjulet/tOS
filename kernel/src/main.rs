@@ -6,7 +6,7 @@
 
 use bootloader_api::{BootInfo, BootloaderConfig, config::Mapping, entry_point};
 use kernel::{
-    allocator, filesystem, interrupts,
+    filesystem, init_logger, interrupts,
     networking::{network_rx_task, network_tx_task},
     task::{Task, executor::Executor, keyboard},
 };
@@ -22,8 +22,13 @@ pub static BOOTLOADER_CONFIG: BootloaderConfig = {
 entry_point!(kernel_main, config = &BOOTLOADER_CONFIG);
 
 fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
+    let frame_buffer = boot_info.framebuffer.as_mut().unwrap();
+    let info = frame_buffer.info();
+    let buf = frame_buffer.buffer_mut();
+    init_logger(buf, info);
+
     kernel::init();
-    allocator::init(boot_info).expect("heap initialization failed");
+    // allocator::init(boot_info).expect("heap initialization failed");
 
     // networking::init();
     filesystem::init();

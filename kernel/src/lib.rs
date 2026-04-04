@@ -8,16 +8,21 @@
 pub mod allocator;
 pub mod arch;
 pub mod filesystem;
+pub mod frame_buffer;
 pub mod gdt;
 pub mod helpers;
 pub mod interrupts;
+pub mod logger;
 pub mod networking;
 pub mod pci;
 pub mod serial;
 pub mod task;
-pub mod vga_buffer;
 
 use core::panic::PanicInfo;
+
+use bootloader_api::info::FrameBufferInfo;
+
+use crate::logger::LockedLogger;
 
 extern crate alloc;
 
@@ -28,6 +33,12 @@ pub fn init() {
     interrupts::init_pics();
 
     x86_64::instructions::interrupts::enable();
+}
+
+pub fn init_logger(frame_buffer: &'static mut [u8], info: FrameBufferInfo) {
+    let logger = logger::LOGGER.get_or_init(move || LockedLogger::new(frame_buffer, info));
+    log::set_logger(logger).expect("logger already set!");
+    log::set_max_level(log::LevelFilter::Trace);
 }
 
 pub trait Testable {
