@@ -43,11 +43,11 @@ impl Rsdp {
         Ok(())
     }
 
-    pub fn address(&self) -> usize {
+    pub fn address(&self) -> u64 {
         if self.revision == 0 {
-            self.rsdt_addr as usize
+            self.rsdt_addr as u64
         } else {
-            self.xsdt_addr as usize
+            self.xsdt_addr
         }
     }
 }
