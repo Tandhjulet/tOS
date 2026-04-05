@@ -14,7 +14,6 @@ pic8259 = "0.10.1"
 pc-keyboard = "0.7.0"
 num_enum = { version = "0.7.6", default-features = false }
 bitflags = { version = "2.11.0", default-features = false }
-acpi = "6.1.1"
 log = "0.4.17"
 
 [dependencies.crossbeam-queue]

@@ -176,10 +176,18 @@ impl PciDevice {
         self.set_command(self.command() | cmd::BUS_MASTER);
     }
 
+    pub fn bar_offset_from_idx(idx: usize) -> u8 {
+        Self::OFF_BARS_START + (idx as u8) * 4
+    }
+
+    pub fn bar_idx_from_offset(offset: u16) -> usize {
+        (offset >> 2) as usize - (Self::OFF_BARS_START >> 2) as usize
+    }
+
     fn enumerate_bars(&mut self) {
         let mut slot = 0;
         while slot < self.header_type.bar_count() {
-            let offset = Self::OFF_BARS_START + (slot as u8 * 4);
+            let offset = Self::bar_offset_from_idx(slot);
             let raw = self.read(offset);
 
             if raw == 0 || raw == 0xFFFF_FFFF {
