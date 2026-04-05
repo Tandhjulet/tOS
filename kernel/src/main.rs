@@ -6,7 +6,7 @@
 
 use bootloader_api::{BootInfo, BootloaderConfig, config::Mapping, entry_point};
 use kernel::{
-    allocator, filesystem, init_logger,
+    allocator, init_logger,
     io::net::{network_rx_task, network_tx_task},
     sys::{
         acpi::Acpi,

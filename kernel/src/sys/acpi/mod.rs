@@ -1,5 +1,7 @@
+use core::iter;
+
 use alloc::string::String;
-use x86_64::PhysAddr;
+use x86_64::{PhysAddr, VirtAddr};
 
 use crate::{
     allocator::mmio,
@@ -9,6 +11,10 @@ use crate::{
 pub mod rsdp;
 pub mod sdt;
 
+/**
+ * This ACPI implementation is heavily inspired by https://github.com/rust-osdev/acpi
+ * and the amazing documentation as wiki.osdev.org!
+ */
 #[derive(Clone)]
 pub struct Acpi;
 
@@ -48,5 +54,32 @@ impl AcpiTables {
         let rsdt = unsafe { *rsdt_virt.as_ptr::<SdtHeader>() };
 
         Ok(Self { rsdt, revision })
+    }
+
+    pub fn table_entries(&self) -> impl Iterator<Item = usize> {
+        let entry_size: usize = if self.revision == 0 { 4 } else { 8 };
+        let header_start = (&self.rsdt) as *const SdtHeader;
+        let mut entries_ptr = unsafe { header_start.byte_add(size_of::<SdtHeader>()).cast::<u8>() };
+
+        let mut num_entries = (self.rsdt.length as usize - size_of::<SdtHeader>()) / entry_size;
+
+        iter::from_fn(move || {
+            if num_entries > 0 {
+                let entry = unsafe {
+                    let entry = if self.revision == 0 {
+                        *entries_ptr.cast::<u32>() as usize
+                    } else {
+                        *entries_ptr.cast::<u64>() as usize
+                    };
+                    entries_ptr = entries_ptr.byte_add(entry_size);
+                    entry
+                };
+
+                num_entries -= 1;
+                Some(entry)
+            } else {
+                None
+            }
+        })
     }
 }
