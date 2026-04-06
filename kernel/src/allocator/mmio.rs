@@ -91,6 +91,24 @@ fn map_mmio_region(
     Ok(())
 }
 
+fn unmap_mmio_region(virt_start: VirtAddr, size: u64) {
+    let mut guard = MAPPER.lock();
+    let mapper = guard.as_mut().unwrap();
+
+    let page_range = {
+        let start_page = Page::<Size4KiB>::containing_address(virt_start);
+        let end_page = Page::<Size4KiB>::containing_address(virt_start + size - 1u64);
+
+        Page::range_inclusive(start_page, end_page)
+    };
+
+    for page in page_range {
+        if let Ok((_, flush)) = mapper.unmap(page) {
+            flush.flush();
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct MappedRegion {
     virt: VirtAddr,
@@ -123,6 +141,6 @@ impl MappedRegion {
 
 impl Drop for MappedRegion {
     fn drop(&mut self) {
-        todo!()
+        unmap_mmio_region(self.virt(), self.len());
     }
 }
