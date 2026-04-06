@@ -1,5 +1,3 @@
-pub mod bar;
-
 use core::fmt;
 
 use alloc::{borrow::ToOwned, format, string::String, sync::Arc, vec::Vec};
@@ -13,10 +11,13 @@ use crate::{
     io::pci::bar::Bar,
     println,
     sys::acpi::{
-        ACPI, Acpi,
+        ACPI,
         sdt::mcfg::{Mcfg, McfgEntry},
     },
 };
+
+pub mod bar;
+pub mod enumerator;
 
 const CONFIG_ADDRESS: u16 = 0xCF8;
 const CONFIG_DATA: u16 = 0xCFC;
@@ -91,6 +92,7 @@ impl PciDevice {
     const OFF_HEADER: u8 = 0x0C;
     const OFF_INTERRUPT: u8 = 0x3C;
     const OFF_BARS_START: u8 = 0x10;
+    const OFF_SEC_BUS: u8 = 0x19;
 
     pub fn new(id: u32, bus: u8, device: u8, function: u8) -> Result<Self, String> {
         let vendor_id = (id & 0xFFFF) as u16;
