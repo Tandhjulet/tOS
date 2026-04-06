@@ -2,9 +2,7 @@ use core::ptr::read_volatile;
 
 use alloc::sync::Arc;
 use spin::Mutex;
-use x86_64::{
-    VirtAddr, instructions::interrupts::without_interrupts, structures::idt::InterruptStackFrame,
-};
+use x86_64::{instructions::interrupts::without_interrupts, structures::idt::InterruptStackFrame};
 
 /**
  * See https://www.intel.com/content/dam/doc/manual/pci-pci-x-family-gbe-controllers-software-dev-manual.pdf#page389
@@ -12,10 +10,12 @@ use x86_64::{
 	* details regarding the implementation of the E1000 driver.
 	*/
 use crate::{
-    allocator::mmio::alloc_dma_region,
+    allocator::mmio::{MappedRegion, alloc_dma_region},
     interrupts::{IDT, MIN_INTERRUPT, PICS},
-    io::net::{MacAddr, RX_QUEUE, drivers::NetworkDriver},
-    io::pci::{PciDevice, bar::BarKind},
+    io::{
+        net::{MacAddr, RX_QUEUE, drivers::NetworkDriver},
+        pci::{PciDevice, bar::BarKind},
+    },
     println,
 };
 
@@ -186,8 +186,8 @@ pub struct E1000 {
     device: Arc<Mutex<PciDevice>>,
     eeprom_exists: bool,
     mac: MacAddr,
-    rx_descs_addr: VirtAddr,
-    tx_descs_addr: VirtAddr,
+    rx_region: Option<MappedRegion>,
+    tx_region: Option<MappedRegion>,
     rx_cur: u16,
     tx_cur: u16,
 }
@@ -209,8 +209,8 @@ impl E1000 {
             device: Arc::clone(&device),
             eeprom_exists: false,
             mac: MacAddr::zero(),
-            tx_descs_addr: VirtAddr::zero(),
-            rx_descs_addr: VirtAddr::zero(),
+            tx_region: None,
+            rx_region: None,
             rx_cur: 0,
             tx_cur: 0,
             interrupt_line: irq,
@@ -298,7 +298,7 @@ impl E1000 {
                 return false;
             }
             BarKind::Mem { .. } => {
-                let virt_addr = bar0.virt_addr().unwrap();
+                let virt_addr = bar0.region().expect("DMA region not init for BAR").virt();
                 let mem_base_mac8: *const u8 = (virt_addr.as_u64() + 0x5400) as *const u8;
                 let mem_base_mac32: *const u32 = (virt_addr.as_u64() + 0x5400) as *const u32;
 
@@ -340,7 +340,12 @@ impl E1000 {
     }
 
     fn get_desc_buffer_ptr(&self, buffer_idx: usize) -> *const u8 {
-        let descs_addr = self.rx_descs_addr.as_u64();
+        let descs_addr = self
+            .rx_region
+            .as_ref()
+            .expect("RX buffer not created")
+            .virt()
+            .as_u64();
         let buffers_start_addr = descs_addr + (size_of::<E1000RxDesc>() * cfg::NUM_RX_DESC) as u64;
 
         (buffers_start_addr + (buffer_idx * cfg::RX_BUFFER_SIZE) as u64) as *const _
@@ -350,8 +355,15 @@ impl E1000 {
         let mut received: bool = false;
         loop {
             let curr_idx = self.rx_cur as usize;
-            let desc =
-                unsafe { &mut *self.rx_descs_addr.as_mut_ptr::<E1000RxDesc>().add(curr_idx) };
+            let desc = unsafe {
+                &mut *self
+                    .rx_region
+                    .as_ref()
+                    .expect("RX buffer not created")
+                    .virt()
+                    .as_mut_ptr::<E1000RxDesc>()
+                    .add(curr_idx)
+            };
 
             if unsafe { read_volatile(&desc.status) } & cfg::tx::STATUS_DD == 0 {
                 break;
@@ -383,10 +395,16 @@ impl E1000 {
         const BLOCK_SIZE: usize = size_of::<E1000RxDesc>() * cfg::NUM_RX_DESC;
         const TOTAL_SIZE: u64 = (BLOCK_SIZE + cfg::RX_BUFFER_SIZE * cfg::NUM_RX_DESC) as u64;
 
-        let (rx_virt, rx_phys) = alloc_dma_region(TOTAL_SIZE);
+        self.rx_region = Some(alloc_dma_region(TOTAL_SIZE));
+        let Some(rx_reg) = self.rx_region.as_ref() else {
+            panic!(
+                "Failed to allocate {} for RX buffer and descriptors!",
+                TOTAL_SIZE
+            );
+        };
 
-        let descs = rx_virt.as_mut_ptr::<E1000RxDesc>();
-        let buffers_phys = rx_phys.as_u64() + BLOCK_SIZE as u64;
+        let descs = rx_reg.virt().as_mut_ptr::<E1000RxDesc>();
+        let buffers_phys = rx_reg.phys().as_u64() + BLOCK_SIZE as u64;
 
         for i in 0..cfg::NUM_RX_DESC {
             let buf_phys = buffers_phys + (i * cfg::RX_BUFFER_SIZE) as u64;
@@ -397,11 +415,12 @@ impl E1000 {
             }
         }
 
-        self.rx_descs_addr = rx_virt;
-
         unsafe {
-            self.write(cfg::rx::DESC_LO, (rx_phys.as_u64() & 0xFFFF_FFFF) as u32);
-            self.write(cfg::rx::DESC_HI, (rx_phys.as_u64() >> 32) as u32);
+            self.write(
+                cfg::rx::DESC_LO,
+                (rx_reg.phys().as_u64() & 0xFFFF_FFFF) as u32,
+            );
+            self.write(cfg::rx::DESC_HI, (rx_reg.phys().as_u64() >> 32) as u32);
             self.write(cfg::rx::DESC_LEN, (BLOCK_SIZE) as u32);
 
             self.write(cfg::rx::DESC_HEAD, 0);
@@ -423,10 +442,14 @@ impl E1000 {
     }
 
     pub fn tx_init(&mut self) {
-        let (tx_virt, tx_phys) =
-            alloc_dma_region((size_of::<E1000TxDesc>() * cfg::NUM_TX_DESC) as u64);
+        const TOTAL_SIZE: u64 = (size_of::<E1000TxDesc>() * cfg::NUM_TX_DESC) as u64;
 
-        let tx_descs = tx_virt.as_mut_ptr::<E1000TxDesc>();
+        self.tx_region = Some(alloc_dma_region(TOTAL_SIZE));
+        let Some(tx_reg) = self.tx_region.as_ref() else {
+            panic!("Failed to allocate {} for TX descriptors!", TOTAL_SIZE);
+        };
+
+        let tx_descs = tx_reg.virt().as_mut_ptr::<E1000TxDesc>();
         for i in 0..cfg::NUM_TX_DESC {
             unsafe {
                 let desc = tx_descs.add(i);
@@ -436,11 +459,12 @@ impl E1000 {
             }
         }
 
-        self.tx_descs_addr = tx_virt;
-
         unsafe {
-            self.write(cfg::tx::DESC_LO, (tx_phys.as_u64() & 0xFFFFFFFF) as u32);
-            self.write(cfg::tx::DESC_HI, (tx_phys.as_u64() >> 32) as u32);
+            self.write(
+                cfg::tx::DESC_LO,
+                (tx_reg.phys().as_u64() & 0xFFFFFFFF) as u32,
+            );
+            self.write(cfg::tx::DESC_HI, (tx_reg.phys().as_u64() >> 32) as u32);
 
             let tx_desc_size = size_of::<E1000TxDesc>();
             self.write(cfg::tx::DESC_LEN, (cfg::NUM_TX_DESC * tx_desc_size) as u32);
@@ -500,19 +524,27 @@ impl NetworkDriver for E1000 {
 
     fn prepare_transmit(&mut self, data: &[u8]) {
         // TODO: don't realloc to ensure DMA - use pre-alloc buffers for performance
-        let (tx_buf_virt, tx_buf_phys) = alloc_dma_region(data.len() as u64);
+        let tx_reg = alloc_dma_region(data.len() as u64);
         unsafe {
             core::ptr::copy_nonoverlapping(
                 data.as_ptr(),
-                tx_buf_virt.as_mut_ptr::<u8>(),
+                tx_reg.virt().as_mut_ptr::<u8>(),
                 data.len(),
             );
         }
 
         let curr_idx = self.tx_cur as usize;
-        let desc = unsafe { &mut *self.tx_descs_addr.as_mut_ptr::<E1000TxDesc>().add(curr_idx) };
+        let desc = unsafe {
+            &mut *self
+                .tx_region
+                .as_mut()
+                .expect("TX buffer not created")
+                .virt()
+                .as_mut_ptr::<E1000TxDesc>()
+                .add(curr_idx)
+        };
 
-        desc.addr = tx_buf_phys.as_u64();
+        desc.addr = tx_reg.phys().as_u64();
         desc.length = data.len() as u16;
         desc.cmd = cfg::tx::CMD_EOP | cfg::tx::CMD_IFCS | cfg::tx::CMD_RS;
         desc.status = 0x0;

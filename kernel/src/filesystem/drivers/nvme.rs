@@ -2,10 +2,9 @@ use core::ptr::{read_volatile, write_volatile};
 
 use alloc::{sync::Arc, vec::Vec};
 use spin::Mutex;
-use x86_64::{PhysAddr, VirtAddr};
 
 use crate::{
-    allocator::mmio::{PAGE_SIZE, alloc_dma_region},
+    allocator::mmio::{MappedRegion, PAGE_SIZE, alloc_dma_region},
     filesystem::drivers::StorageDevice,
     io::pci::{PciDevice, bar::Bar},
     println,
@@ -71,7 +70,7 @@ pub struct NvmeController {
 
     adm_comp_queue: Option<Queue>,
     adm_subm_queue: Option<Queue>,
-    adm_buf: (VirtAddr, PhysAddr),
+    adm_buf: MappedRegion,
 
     namespaces: Vec<NvmeNamespace>,
 }
@@ -253,14 +252,14 @@ impl NvmeController {
 
     fn identify_read<T: Copy>(&mut self, cns: u32, cmd: impl FnOnce(&mut SQEntry)) -> T {
         self.identify(cns, cmd);
-        let identify = unsafe { *(self.adm_buf.0.as_ptr::<T>()) };
+        let identify = unsafe { *(self.adm_buf.as_ptr::<T>()) };
         identify
     }
 
     fn identify(&mut self, cns: u32, cmd: impl FnOnce(&mut SQEntry)) -> CQEntry {
         let mut identify = SQEntry::default();
         identify.cdw0 = cfg::op::IDENTIFY | (1 << 16);
-        identify.prp1 = self.adm_buf.1.as_u64();
+        identify.prp1 = self.adm_buf.phys().as_u64();
         identify.cdw10 = cns;
 
         cmd(&mut identify);
@@ -271,7 +270,7 @@ impl NvmeController {
     fn set_features(&mut self, fid: u32, cmd: impl FnOnce(&mut SQEntry)) -> CQEntry {
         let mut features = SQEntry::default();
         features.cdw0 = cfg::op::SET_FEATURES | (1 << 16);
-        features.prp1 = self.adm_buf.1.as_u64();
+        features.prp1 = self.adm_buf.phys().as_u64();
         features.cdw10 = fid;
 
         cmd(&mut features);
@@ -308,14 +307,8 @@ impl NvmeController {
         let mut asq = Queue::default();
         let mut acq = Queue::default();
 
-        let (asq_virt, asq_phys) = alloc_dma_region(PAGE_SIZE);
-        let (acq_virt, acq_phys) = alloc_dma_region(PAGE_SIZE);
-
-        asq.queue_phys = asq_phys.as_u64();
-        acq.queue_phys = acq_phys.as_u64();
-
-        asq.queue_virt = asq_virt.as_u64();
-        acq.queue_virt = acq_virt.as_u64();
+        asq.region = Some(alloc_dma_region(PAGE_SIZE));
+        acq.region = Some(alloc_dma_region(PAGE_SIZE));
 
         asq.size = 63;
         acq.size = 63;
@@ -327,8 +320,8 @@ impl NvmeController {
         unsafe { bar.write32(cfg::AQA, aqa) };
 
         unsafe {
-            bar.write64(cfg::ASQ, asq.queue_phys);
-            bar.write64(cfg::ACQ, acq.queue_phys);
+            bar.write64(cfg::ASQ, asq.phys());
+            bar.write64(cfg::ACQ, acq.phys());
         }
 
         (asq, acq)
@@ -337,7 +330,7 @@ impl NvmeController {
     fn submit_admin_command(&mut self, cmd: SQEntry) -> CQEntry {
         let sq = self.adm_subm_queue.as_mut().unwrap();
 
-        let slot = sq.queue_virt + (sq.tail as u64 * size_of::<SQEntry>() as u64);
+        let slot = sq.virt() + (sq.tail as u64 * size_of::<SQEntry>() as u64);
         unsafe {
             write_volatile(slot as *mut SQEntry, cmd);
         };
@@ -356,7 +349,7 @@ impl NvmeController {
         loop {
             let (slot, phase) = {
                 let cq = self.adm_comp_queue.as_mut().unwrap();
-                let slot = cq.queue_virt + (cq.head as u64 * size_of::<CQEntry>() as u64);
+                let slot = cq.virt() + (cq.head as u64 * size_of::<CQEntry>() as u64);
                 (slot, cq.phase)
             };
 
@@ -501,13 +494,22 @@ impl ControllerCap {
 
 #[derive(Default)]
 struct Queue {
-    queue_phys: u64,
-    queue_virt: u64,
+    region: Option<MappedRegion>,
     size: u64,
 
     tail: u16,
     head: u16,
     phase: u8,
+}
+
+impl Queue {
+    pub fn phys(&self) -> u64 {
+        self.region.as_ref().map(|r| r.phys().as_u64()).unwrap_or(0)
+    }
+
+    pub fn virt(&self) -> u64 {
+        self.region.as_ref().map(|r| r.virt().as_u64()).unwrap_or(0)
+    }
 }
 
 #[derive(Default)]

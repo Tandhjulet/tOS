@@ -1,14 +1,15 @@
-use core::{
-    cell::Cell,
-    ptr::{read_volatile, write_volatile},
-};
+use core::ptr::{read_volatile, write_volatile};
 
+use conquer_once::spin::OnceCell;
 use x86_64::{
-    PhysAddr, VirtAddr,
+    PhysAddr,
     instructions::{interrupts::without_interrupts, port::Port},
 };
 
-use crate::{allocator::mmio, io::pci::PciDevice};
+use crate::{
+    allocator::mmio::{self, MappedRegion},
+    io::pci::PciDevice,
+};
 
 #[derive(Debug, Clone, Copy)]
 pub struct IoAddr(pub u16);
@@ -40,8 +41,8 @@ pub struct Bar {
 
     offset: u8,
 
-    // Only meaningful for Mem Baars
-    virt: Cell<Option<VirtAddr>>,
+    // MMIO region (for Mem Bars)
+    mm_region: OnceCell<MappedRegion>,
 }
 
 // I/O Space BAR layout
@@ -63,7 +64,7 @@ impl Bar {
                 kind,
                 size,
                 offset,
-                virt: Cell::new(None),
+                mm_region: OnceCell::uninit(),
             },
             slots_used,
         )
@@ -129,30 +130,20 @@ impl Bar {
         self.offset
     }
 
-    pub fn virt_addr(&self) -> Option<VirtAddr> {
-        self.virt.get()
-    }
-
-    pub fn set_virt_addr(&self, addr: VirtAddr) {
-        assert!(
-            matches!(self.kind, BarKind::Mem { .. }),
-            "Cannot set virt_addr for an I/O BAR"
-        );
-        self.virt.set(Some(addr));
+    pub fn region(&self) -> Option<&MappedRegion> {
+        self.mm_region.get()
     }
 
     pub fn map_mmio(&self) {
         match self.kind() {
             BarKind::Io { .. } => {}
             BarKind::Mem { addr, .. } => {
-                let virt_addr = {
+                self.mm_region.init_once(|| {
                     let phys_addr = addr.phys();
 
                     let size = self.size() as u64;
                     mmio::map_mmio(phys_addr, size)
-                };
-
-                self.set_virt_addr(virt_addr);
+                });
             }
         }
     }
@@ -164,11 +155,11 @@ impl Bar {
                 port.write(val);
             },
             BarKind::Mem { .. } => {
-                let virt = self
-                    .virt_addr()
+                let region = self
+                    .region()
                     .expect("write32 on Mem BAR before virt_addr was set");
 
-                let ptr = (virt.as_u64() + reg_offset as u64) as *mut u32;
+                let ptr = (region.virt().as_u64() + reg_offset as u64) as *mut u32;
                 without_interrupts(|| unsafe {
                     write_volatile(ptr, val);
                 })
@@ -183,11 +174,11 @@ impl Bar {
                 port.read()
             },
             BarKind::Mem { .. } => {
-                let virt = self
-                    .virt_addr()
+                let region = self
+                    .region()
                     .expect("read32 on Mem BAR before virt_addr was set");
 
-                let ptr = (virt.as_u64() + reg_offset as u64) as *const u32;
+                let ptr = (region.virt().as_u64() + reg_offset as u64) as *const u32;
                 without_interrupts(|| unsafe { read_volatile(ptr) })
             }
         }

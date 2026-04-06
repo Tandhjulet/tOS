@@ -13,7 +13,7 @@ pub static PAGE_SIZE: u64 = 0x1000;
 pub static NEXT_PHYS: AtomicU64 = AtomicU64::new(0x1000_0000);
 pub static NEXT_MMIO: AtomicU64 = AtomicU64::new(0xFFFF_8000_0000_0000);
 
-pub fn alloc_dma_region(size: u64) -> (VirtAddr, PhysAddr) {
+pub fn alloc_dma_region(size: u64) -> MappedRegion {
     let aligned_size = (size + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
     let pages = aligned_size / PAGE_SIZE;
 
@@ -24,6 +24,7 @@ pub fn alloc_dma_region(size: u64) -> (VirtAddr, PhysAddr) {
 
     let first_frame = frame_allocator.allocate_frame().expect("DMA alloc failed");
     let phys = first_frame.start_address();
+    assert!(phys.is_aligned(PAGE_SIZE), "DMA frame not page-aligned!");
 
     for _ in 1..pages {
         frame_allocator.allocate_frame().expect("DMA alloc failed");
@@ -31,11 +32,10 @@ pub fn alloc_dma_region(size: u64) -> (VirtAddr, PhysAddr) {
 
     drop(frame_guard);
 
-    let virt = map_mmio(phys, aligned_size);
-    (virt, phys)
+    map_mmio(phys, aligned_size)
 }
 
-pub fn map_mmio(phys_addr: PhysAddr, size: u64) -> VirtAddr {
+pub fn map_mmio(phys_addr: PhysAddr, size: u64) -> MappedRegion {
     let aligned_size = (size + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
 
     let virt_start =
@@ -51,10 +51,16 @@ pub fn map_mmio(phys_addr: PhysAddr, size: u64) -> VirtAddr {
     // if the phys_addr was not page aligned, we need to
     // add the offset to the virt start
     let offset = phys_addr.as_u64() & (PAGE_SIZE - 1);
-    virt_start + offset
+    let virt = virt_start + offset;
+
+    MappedRegion {
+        virt,
+        phys: phys_start,
+        len: aligned_size,
+    }
 }
 
-pub fn map_mmio_region(
+fn map_mmio_region(
     phys_addr: PhysAddr,
     virt_start: VirtAddr,
     size: u64,
@@ -83,4 +89,40 @@ pub fn map_mmio_region(
     }
 
     Ok(())
+}
+
+#[derive(Debug)]
+pub struct MappedRegion {
+    virt: VirtAddr,
+    phys: PhysAddr,
+
+    len: u64,
+}
+
+impl MappedRegion {
+    pub fn phys(&self) -> PhysAddr {
+        self.phys
+    }
+
+    pub fn virt(&self) -> VirtAddr {
+        self.virt
+    }
+
+    pub fn len(&self) -> u64 {
+        self.len
+    }
+
+    pub fn as_ptr<T>(&self) -> *const T {
+        self.virt.as_ptr()
+    }
+
+    pub fn as_mut_ptr<T>(&self) -> *mut T {
+        self.virt.as_mut_ptr()
+    }
+}
+
+impl Drop for MappedRegion {
+    fn drop(&mut self) {
+        todo!()
+    }
 }

@@ -87,9 +87,10 @@ impl AcpiTables {
         self.table_entries().filter_map(|raw_phys_addr| {
             let phys_addr = PhysAddr::new(raw_phys_addr as u64);
 
-            // TODO: unmap virt
             let header_virt = mmio::map_mmio(phys_addr, size_of::<SdtHeader>() as u64);
             let header = unsafe { &*header_virt.as_ptr::<SdtHeader>() };
+            // TODO: read len and sign and then unmap header
+
             if header.signature == T::SIGNATURE {
                 let len = header.length;
 
