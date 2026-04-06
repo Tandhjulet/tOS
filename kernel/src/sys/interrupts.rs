@@ -43,21 +43,21 @@ pub fn init_pics() {
 }
 
 pub fn init_idt() {
-    let mut idt = IDT.lock();
-    idt.breakpoint.set_handler_fn(breakpoint_handler);
-    unsafe {
-        idt.double_fault
-            .set_handler_fn(double_fault_handler)
-            .set_stack_index(gdt::DOUBLE_FAULT_IST_INDEX);
+    {
+        let mut idt = IDT.lock();
+        idt.breakpoint.set_handler_fn(breakpoint_handler);
+        unsafe {
+            idt.double_fault
+                .set_handler_fn(double_fault_handler)
+                .set_stack_index(gdt::DOUBLE_FAULT_IST_INDEX);
+        }
+        idt.page_fault.set_handler_fn(page_fault_handler);
+
+        // FIXME: don't hardcode... create a registrar
+        idt[InterruptIndex::Timer.as_usize()].set_handler_fn(timer_interrupt_handler);
+        idt[InterruptIndex::Keyboard.as_usize()].set_handler_fn(keyboard_interrupt_handler);
     }
-    idt.page_fault.set_handler_fn(page_fault_handler);
 
-    // FIXME: don't hardcode... create a registrar
-    idt[InterruptIndex::Timer.as_usize()].set_handler_fn(timer_interrupt_handler);
-    idt[InterruptIndex::Keyboard.as_usize()].set_handler_fn(keyboard_interrupt_handler);
-
-    // clear lock and load
-    drop(idt);
     load_idt();
 }
 
