@@ -1,7 +1,7 @@
 use core::iter;
 
 use alloc::string::String;
-use x86_64::{PhysAddr, VirtAddr};
+use x86_64::PhysAddr;
 
 use crate::{
     allocator::mmio,
@@ -13,7 +13,7 @@ pub mod sdt;
 
 /**
  * This ACPI implementation is heavily inspired by https://github.com/rust-osdev/acpi
- * and the amazing documentation as wiki.osdev.org!
+ * and the amazing documentation at wiki.osdev.org!
  */
 #[derive(Clone)]
 pub struct Acpi;
@@ -82,4 +82,36 @@ impl AcpiTables {
             }
         })
     }
+
+    pub fn find_tables<T: AcpiTable>(&self) -> impl Iterator<Item = *mut T> {
+        self.table_entries().filter_map(|raw_phys_addr| {
+            let phys_addr = PhysAddr::new(raw_phys_addr as u64);
+
+            // TODO: unmap virt
+            let header_virt = mmio::map_mmio(phys_addr, size_of::<SdtHeader>() as u64);
+            let header = unsafe { &*header_virt.as_ptr::<SdtHeader>() };
+            if header.signature == T::SIGNATURE {
+                let len = header.length;
+
+                let table_virt = mmio::map_mmio(phys_addr, len as u64);
+                Some(table_virt.as_mut_ptr::<T>())
+            } else {
+                None
+            }
+        })
+    }
+}
+
+pub unsafe trait AcpiTable {
+    const SIGNATURE: Signature;
+
+    fn header(&self) -> &SdtHeader;
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(transparent)]
+pub struct Signature([u8; 4]);
+
+impl Signature {
+    pub const MCFG: Signature = Signature(*b"MCFG");
 }

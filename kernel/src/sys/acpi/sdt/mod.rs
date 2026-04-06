@@ -1,7 +1,11 @@
+use crate::sys::acpi::Signature;
+
+pub mod mcfg;
+
 #[derive(Clone, Copy)]
 #[repr(C, packed)]
 pub struct SdtHeader {
-    pub signature: [u8; 4],
+    pub signature: Signature,
     pub length: u32,
     pub revision: u8,
     pub checksum: u8,
