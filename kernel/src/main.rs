@@ -7,9 +7,12 @@
 use bootloader_api::{BootInfo, BootloaderConfig, config::Mapping, entry_point};
 use kernel::{
     allocator, init_logger,
-    io::net::{network_rx_task, network_tx_task},
+    io::{
+        net::{network_rx_task, network_tx_task},
+        pci,
+    },
     sys::{
-        acpi::Acpi,
+        acpi::{ACPI, Acpi, sdt::mcfg::Mcfg},
         interrupts,
         task::{Task, executor::Executor, keyboard},
     },
@@ -31,12 +34,10 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     kernel::init();
     allocator::init(boot_info).expect("heap initialization failed");
 
-    if let Some(&rsdp_addr) = boot_info.rsdp_addr.as_ref() {
-        if let Err(msg) = Acpi::init(rsdp_addr) {
-            log::error!("{}", msg);
-        }
+    if let Err(msg) = Acpi::try_init(boot_info.rsdp_addr) {
+        log::error!("{}", msg);
     } else {
-        log::info!("failed to find rsdp_addr!");
+        pci::init_pcie();
     }
 
     // networking::init();

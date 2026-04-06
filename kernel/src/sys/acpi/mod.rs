@@ -1,28 +1,45 @@
-use core::iter;
+use core::{iter, marker::PhantomData};
 
-use alloc::string::String;
+use alloc::{borrow::ToOwned, string::String};
+use bootloader_api::info::Optional;
+use conquer_once::spin::OnceCell;
 use x86_64::PhysAddr;
 
 use crate::{
-    allocator::mmio,
+    allocator::mmio::{self, MappedRegion},
     sys::acpi::{rsdp::Rsdp, sdt::SdtHeader},
 };
 
 pub mod rsdp;
 pub mod sdt;
 
+pub static ACPI: OnceCell<Acpi> = OnceCell::uninit();
+
 /**
  * This ACPI implementation is heavily inspired by https://github.com/rust-osdev/acpi
  * and the amazing documentation at wiki.osdev.org!
  */
-#[derive(Clone)]
-pub struct Acpi;
+pub struct Acpi {
+    tables: AcpiTables,
+}
 
 impl Acpi {
-    pub fn init(rsdp: u64) -> Result<(), String> {
+    pub fn try_init(rsdp: Optional<u64>) -> Result<Self, String> {
+        if let Some(&rsdp) = rsdp.as_ref() {
+            Self::init(rsdp)
+        } else {
+            Err("RSDP not provided".to_owned())
+        }
+    }
+
+    pub fn init(rsdp: u64) -> Result<Self, String> {
         let tables = unsafe { AcpiTables::from_rsdp(rsdp) }?;
 
-        Ok(())
+        Ok(Self { tables })
+    }
+
+    pub fn tables(&self) -> &AcpiTables {
+        &self.tables
     }
 }
 
@@ -83,23 +100,28 @@ impl AcpiTables {
         })
     }
 
-    pub fn find_tables<T: AcpiTable>(&self) -> impl Iterator<Item = *mut T> {
+    pub fn find_tables<T: AcpiTable>(&self) -> impl Iterator<Item = MappedTable<T>> {
         self.table_entries().filter_map(|raw_phys_addr| {
             let phys_addr = PhysAddr::new(raw_phys_addr as u64);
 
-            let header_virt = mmio::map_mmio(phys_addr, size_of::<SdtHeader>() as u64);
-            let header = unsafe { &*header_virt.as_ptr::<SdtHeader>() };
-            // TODO: read len and sign and then unmap header
+            let header_region = mmio::map_mmio(phys_addr, size_of::<SdtHeader>() as u64);
+            let header = unsafe { &*header_region.as_ptr::<SdtHeader>() };
 
             if header.signature == T::SIGNATURE {
                 let len = header.length;
 
-                let table_virt = mmio::map_mmio(phys_addr, len as u64);
-                Some(table_virt.as_mut_ptr::<T>())
+                Some(MappedTable {
+                    region: mmio::map_mmio(phys_addr, len as u64),
+                    _phantom: PhantomData,
+                })
             } else {
                 None
             }
         })
+    }
+
+    pub fn find_table<T: AcpiTable>(&self) -> Option<MappedTable<T>> {
+        self.find_tables().next()
     }
 }
 
@@ -107,6 +129,21 @@ pub unsafe trait AcpiTable {
     const SIGNATURE: Signature;
 
     fn header(&self) -> &SdtHeader;
+}
+
+pub struct MappedTable<T: AcpiTable> {
+    region: MappedRegion,
+    _phantom: PhantomData<T>,
+}
+
+impl<T: AcpiTable> MappedTable<T> {
+    pub fn as_ptr(&self) -> *const T {
+        self.region.as_ptr()
+    }
+
+    pub fn as_mut_ptr(&self) -> *mut T {
+        self.region.as_mut_ptr()
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

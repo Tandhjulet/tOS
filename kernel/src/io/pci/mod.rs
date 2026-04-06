@@ -2,13 +2,21 @@ pub mod bar;
 
 use core::fmt;
 
-use alloc::{format, string::String, sync::Arc, vec::Vec};
+use alloc::{borrow::ToOwned, format, string::String, sync::Arc, vec::Vec};
 use lazy_static::lazy_static;
 use num_enum::TryFromPrimitive;
 use spin::Mutex;
-use x86_64::instructions::port::Port;
+use x86_64::{PhysAddr, instructions::port::Port};
 
-use crate::{io::pci::bar::Bar, println};
+use crate::{
+    allocator::mmio::{MappedRegion, map_mmio},
+    io::pci::bar::Bar,
+    println,
+    sys::acpi::{
+        ACPI, Acpi,
+        sdt::mcfg::{Mcfg, McfgEntry},
+    },
+};
 
 const CONFIG_ADDRESS: u16 = 0xCF8;
 const CONFIG_DATA: u16 = 0xCFC;
@@ -34,6 +42,8 @@ pub mod cmd {
     pub const INTERRUPT: u16 = 1 << 10; // If set, the devices INTx# signal is disabled
 }
 
+const PCIE_CONFIG_SPACE: usize = 4096;
+
 #[derive(Debug)]
 pub struct PciDevice {
     bus: u8,
@@ -47,6 +57,9 @@ pub struct PciDevice {
 
     bars: Vec<Option<Bar>>,
     header_type: HeaderType,
+
+    // PCIe devices have extended configuration space
+    ext_cfg: Option<MappedRegion>,
 }
 
 #[derive(Debug, Clone, Copy, TryFromPrimitive)]
@@ -101,6 +114,7 @@ impl PciDevice {
             class,
             subclass,
             header_type,
+            ext_cfg: None,
         };
         device.enumerate_bars();
 
@@ -113,6 +127,21 @@ impl PciDevice {
 
     pub fn write(&self, offset: u8, value: u32) {
         pci_write(self.bus, self.device, self.function, offset, value);
+    }
+
+    pub fn is_pcie(&self) -> bool {
+        self.ext_cfg.is_some() // check capabilities too?
+    }
+
+    pub fn set_cfg(&mut self, entry: McfgEntry) {
+        let phys_cfg_addr = entry.base_addr + (((self.bus - entry.bus_num_start) as u64) << 20)
+            | ((self.device as u64) << 15)
+            | ((self.function as u64) << 12);
+
+        self.ext_cfg = Some(map_mmio(
+            PhysAddr::new(phys_cfg_addr),
+            PCIE_CONFIG_SPACE as u64,
+        ));
     }
 
     pub fn get_bar(&self, index: usize) -> Option<&Bar> {
@@ -222,6 +251,45 @@ impl fmt::Display for PciDevice {
             self.subclass
         )
     }
+}
+
+pub fn init_pcie() -> Result<(), String> {
+    let tables = ACPI
+        .get()
+        .expect("Cannot init PCIe without ACPI loaded!")
+        .tables();
+
+    let raw_mcfg = tables
+        .find_table::<Mcfg>()
+        .ok_or("Failed finding MCFG table!".to_owned())?;
+
+    let mcfg = unsafe { &*raw_mcfg.as_ptr() };
+    let devices = DEVICES.lock();
+    for entry in mcfg.entries().iter() {
+        for bus in entry.bus_num_start..=entry.bus_num_end {
+            const BUS_SIZE: u64 = 32 * 8 * 4096; // 32 dev, 8 functions, 4 kb each = 1MB
+            let bus_phys = entry.base_addr + (((bus - entry.bus_num_start) as u64) << 20);
+            let bus_region = map_mmio(PhysAddr::new(bus_phys), BUS_SIZE);
+
+            for device_num in 0..32u8 {
+                let dev_offset = (device_num as u64) << 15;
+                let id = unsafe { *((bus_region.virt().as_u64() + dev_offset) as *const u32) };
+                if id == 0xFFFF_FFFF {
+                    continue;
+                }
+
+                let header_raw = unsafe {
+                    *((bus_region.virt().as_u64() + dev_offset + (PciDevice::OFF_HEADER as u64))
+                        as *const u32)
+                };
+                let header_raw = ((header_raw >> 16) & 0xFF) as u8;
+                let header_type = HeaderType::try_from(header_raw)
+                    .map_err(|err| format!("failed to map {:#x} to a header type", err.number))?;
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn check_all_buses() -> Vec<Arc<Mutex<PciDevice>>> {
