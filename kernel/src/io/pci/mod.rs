@@ -2,14 +2,17 @@ use core::fmt;
 
 use alloc::{borrow::ToOwned, format, string::String, sync::Arc, vec::Vec};
 use lazy_static::lazy_static;
+use log::error;
 use num_enum::TryFromPrimitive;
 use spin::Mutex;
-use x86_64::{PhysAddr, instructions::port::Port};
+use x86_64::PhysAddr;
 
 use crate::{
     allocator::mmio::{MappedRegion, map_mmio},
-    io::pci::bar::Bar,
-    println,
+    io::pci::{
+        bar::Bar,
+        enumerator::{IoPci, McfgPci, PciEnumerator},
+    },
     sys::acpi::{
         ACPI,
         sdt::mcfg::{Mcfg, McfgEntry},
@@ -19,11 +22,8 @@ use crate::{
 pub mod bar;
 pub mod enumerator;
 
-const CONFIG_ADDRESS: u16 = 0xCF8;
-const CONFIG_DATA: u16 = 0xCFC;
-
 lazy_static! {
-    pub static ref DEVICES: Mutex<Vec<Arc<Mutex<PciDevice>>>> = Mutex::new(check_all_buses());
+    pub static ref DEVICES: Mutex<Vec<Arc<Mutex<PciDevice>>>> = Mutex::new(Vec::new());
 }
 
 //
@@ -94,15 +94,15 @@ impl PciDevice {
     const OFF_BARS_START: u8 = 0x10;
     const OFF_SEC_BUS: u8 = 0x19;
 
-    pub fn new(id: u32, bus: u8, device: u8, function: u8) -> Result<Self, String> {
+    pub fn new_pci(id: u32, bus: u8, device: u8, function: u8) -> Result<Self, String> {
         let vendor_id = (id & 0xFFFF) as u16;
         let device_id = (id >> 16) as u16;
 
-        let class_reg = pci_read(bus, device, function, Self::OFF_CLASS);
+        let class_reg = IoPci::read(bus, device, function, Self::OFF_CLASS);
         let class = (class_reg >> 24) as u8;
         let subclass = (class_reg >> 16) as u8;
 
-        let header_raw = ((pci_read(bus, device, function, Self::OFF_CLASS) >> 16) as u8) & 0x7;
+        let header_raw = ((IoPci::read(bus, device, function, Self::OFF_CLASS) >> 16) as u8) & 0x7;
         let header_type = HeaderType::try_from(header_raw)
             .map_err(|err| format!("failed to map {:#x} to a header type", err.number))?;
 
@@ -123,12 +123,24 @@ impl PciDevice {
         Ok(device)
     }
 
+    pub fn new_pcie(
+        id: u32,
+        bus: u8,
+        device: u8,
+        function: u8,
+        entry: McfgEntry,
+    ) -> Result<Self, String> {
+        let mut dev = Self::new_pci(id, bus, device, function)?;
+        dev.set_cfg(entry);
+        Ok(dev)
+    }
+
     pub fn read(&self, offset: u8) -> u32 {
-        pci_read(self.bus, self.device, self.function, offset)
+        IoPci::read(self.bus, self.device, self.function, offset)
     }
 
     pub fn write(&self, offset: u8, value: u32) {
-        pci_write(self.bus, self.device, self.function, offset, value);
+        IoPci::write(self.bus, self.device, self.function, offset, value);
     }
 
     pub fn is_pcie(&self) -> bool {
@@ -255,7 +267,26 @@ impl fmt::Display for PciDevice {
     }
 }
 
-pub fn init_pcie() -> Result<(), String> {
+pub fn init() {
+    if let Err(msg) = init_pci() {
+        error!("PCI: {}", msg);
+    }
+
+    if let Err(msg) = init_pcie() {
+        error!("PCIe: {}", msg);
+    }
+}
+
+fn init_pci() -> Result<(), String> {
+    let found = IoPci.enumerate();
+
+    let mut devices = DEVICES.lock();
+    devices.extend(found.into_iter().map(|dev| Arc::new(Mutex::new(dev))));
+
+    Ok(())
+}
+
+fn init_pcie() -> Result<(), String> {
     let tables = ACPI
         .get()
         .expect("Cannot init PCIe without ACPI loaded!")
@@ -265,115 +296,25 @@ pub fn init_pcie() -> Result<(), String> {
         .find_table::<Mcfg>()
         .ok_or("Failed finding MCFG table!".to_owned())?;
 
+    let mut devices = DEVICES.lock();
     let mcfg = unsafe { &*raw_mcfg.as_ptr() };
-    let devices = DEVICES.lock();
     for entry in mcfg.entries().iter() {
-        for bus in entry.bus_num_start..=entry.bus_num_end {
-            const BUS_SIZE: u64 = 32 * 8 * 4096; // 32 dev, 8 functions, 4 kb each = 1MB
-            let bus_phys = entry.base_addr + (((bus - entry.bus_num_start) as u64) << 20);
-            let bus_region = map_mmio(PhysAddr::new(bus_phys), BUS_SIZE);
+        let enumerator = McfgPci::new(entry);
+        let found = enumerator.enumerate();
 
-            for device_num in 0..32u8 {
-                let dev_offset = (device_num as u64) << 15;
-                let id = unsafe { *((bus_region.virt().as_u64() + dev_offset) as *const u32) };
-                if id == 0xFFFF_FFFF {
-                    continue;
-                }
+        for new_dev in found {
+            let existing = devices.iter_mut().find(|d| {
+                let d = d.lock();
+                d.bus == new_dev.bus && d.device == new_dev.device && d.function == new_dev.function
+            });
 
-                let header_raw = unsafe {
-                    *((bus_region.virt().as_u64() + dev_offset + (PciDevice::OFF_HEADER as u64))
-                        as *const u32)
-                };
-                let header_raw = ((header_raw >> 16) & 0xFF) as u8;
-                let header_type = HeaderType::try_from(header_raw)
-                    .map_err(|err| format!("failed to map {:#x} to a header type", err.number))?;
+            if let Some(dev) = existing {
+                *dev.lock() = new_dev;
+            } else {
+                devices.push(Arc::new(Mutex::new(new_dev)));
             }
         }
     }
 
     Ok(())
-}
-
-fn check_all_buses() -> Vec<Arc<Mutex<PciDevice>>> {
-    let mut devices: Vec<Arc<Mutex<PciDevice>>> = Vec::new();
-    for bus in 0..=255 {
-        for device in 0..32 {
-            check_device(bus, device, &mut devices);
-        }
-    }
-
-    devices
-}
-
-fn check_device(bus: u8, device: u8, devices: &mut Vec<Arc<Mutex<PciDevice>>>) {
-    // https://wiki.osdev.org/PCI#Common_Header_Fields
-    if let Some(dev) = check_function(bus, device, 0) {
-        devices.push(Arc::new(Mutex::new(dev)));
-    } else {
-        return;
-    }
-
-    let header = ((pci_read(bus, device, 0, PciDevice::OFF_HEADER) >> 16) & 0xFF) as u8;
-    if (header & 0x80) != 0 {
-        for function in 1..8 {
-            if let Some(dev) = check_function(bus, device, function) {
-                devices.push(Arc::new(Mutex::new(dev)));
-            }
-        }
-    }
-}
-
-fn check_function(bus: u8, device: u8, function: u8) -> Option<PciDevice> {
-    let id: u32 = pci_read(bus, device, function, PciDevice::OFF_ID);
-    let vendor_id = (id & 0xFFFF) as u16;
-    if vendor_id == 0xFFFF {
-        return None;
-    }
-
-    match PciDevice::new(id, bus, device, function) {
-        Ok(dev) => Some(dev),
-        Err(msg) => {
-            println!("PCI ERROR: {}", msg);
-            None
-        }
-    }
-}
-
-fn get_addr(bus: u8, device: u8, func: u8, offset: u8) -> u32 {
-    let lbus = bus as u32;
-    let ldevice = device as u32;
-    let lfunc = func as u32;
-    let loffset = offset as u32;
-
-    // Bit 31	   Bits 30-24	Bits 23-16	Bits 15-11		Bits 10-8			Bits 7-0
-    // Enable Bit	Reserved	Bus Number	Device Number	Function Number		Register Offset1
-    let address: u32 =
-        0x80000000 | (lbus << 16) | (ldevice << 11) | (lfunc << 8) | (loffset & 0xFC);
-
-    address
-}
-
-// https://wiki.osdev.org/PCI#The_PCI_Bus
-fn pci_read(bus: u8, device: u8, func: u8, offset: u8) -> u32 {
-    let address: u32 = get_addr(bus, device, func, offset);
-
-    let mut addr = Port::<u32>::new(CONFIG_ADDRESS);
-    let mut data = Port::<u32>::new(CONFIG_DATA);
-
-    unsafe {
-        addr.write(address);
-        data.read()
-    }
-}
-
-fn pci_write(bus: u8, device: u8, func: u8, offset: u8, value: u32) {
-    let address: u32 = get_addr(bus, device, func, offset);
-
-    let mut addr = Port::<u32>::new(CONFIG_ADDRESS);
-    let mut data = Port::<u32>::new(CONFIG_DATA);
-
-    unsafe {
-        addr.write(address);
-        data.write(value);
-    }
 }

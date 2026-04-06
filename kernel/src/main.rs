@@ -4,7 +4,7 @@
 #![test_runner(kernel::test_runner)]
 #![reexport_test_harness_main = "test_main"]
 
-use bootloader_api::{BootInfo, BootloaderConfig, config::Mapping, entry_point};
+use bootloader_api::{BootInfo, BootloaderConfig, config::Mapping, entry_point, info::Optional};
 use kernel::{
     allocator, init_logger,
     io::{
@@ -12,11 +12,12 @@ use kernel::{
         pci,
     },
     sys::{
-        acpi::{ACPI, Acpi, sdt::mcfg::Mcfg},
+        acpi::Acpi,
         interrupts,
         task::{Task, executor::Executor, keyboard},
     },
 };
+use log::{error, info};
 
 extern crate alloc;
 
@@ -35,10 +36,10 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     allocator::init(boot_info).expect("heap initialization failed");
 
     if let Err(msg) = Acpi::try_init(boot_info.rsdp_addr) {
-        log::error!("{}", msg);
-    } else {
-        pci::init_pcie();
+        error!("ACPI: {}", msg);
     }
+
+    pci::init();
 
     // networking::init();
     // filesystem::init();

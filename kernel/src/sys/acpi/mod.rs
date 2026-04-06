@@ -24,7 +24,7 @@ pub struct Acpi {
 }
 
 impl Acpi {
-    pub fn try_init(rsdp: Optional<u64>) -> Result<Self, String> {
+    pub fn try_init(rsdp: Optional<u64>) -> Result<(), String> {
         if let Some(&rsdp) = rsdp.as_ref() {
             Self::init(rsdp)
         } else {
@@ -32,10 +32,15 @@ impl Acpi {
         }
     }
 
-    pub fn init(rsdp: u64) -> Result<Self, String> {
-        let tables = unsafe { AcpiTables::from_rsdp(rsdp) }?;
+    pub fn init(rsdp: u64) -> Result<(), String> {
+        if ACPI.is_initialized() {
+            return Err("ACPI already initialized!".to_owned());
+        }
 
-        Ok(Self { tables })
+        let tables = unsafe { AcpiTables::from_rsdp(rsdp) }?;
+        ACPI.init_once(|| Self { tables });
+
+        Ok(())
     }
 
     pub fn tables(&self) -> &AcpiTables {

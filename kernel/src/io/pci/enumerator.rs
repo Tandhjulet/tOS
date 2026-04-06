@@ -1,5 +1,3 @@
-use core::array;
-
 use alloc::{boxed::Box, string::String, vec::Vec};
 use conquer_once::spin::OnceCell;
 use log::warn;
@@ -15,6 +13,7 @@ pub trait PciEnumerator {
     fn read_u8(&self, bus: u8, device: u8, function: u8, offset: u8) -> u8;
     fn read_u16(&self, bus: u8, device: u8, function: u8, offset: u8) -> u16;
     fn read_u32(&self, bus: u8, device: u8, function: u8, offset: u8) -> u32;
+    fn make_device(&self, id: u32, bus: u8, device: u8, function: u8) -> Result<PciDevice, String>;
 
     fn enumerate(&self) -> Vec<PciDevice> {
         let mut devices = Vec::new();
@@ -89,19 +88,15 @@ pub trait PciEnumerator {
             Err(e) => warn!("Failed to init PCI device {:#x}: {}", id, e),
         }
     }
-
-    fn make_device(&self, id: u32, bus: u8, device: u8, function: u8) -> Result<PciDevice, String> {
-        PciDevice::new(id, bus, device, function)
-    }
 }
 
-pub struct CpuIoEnumerator;
+pub struct IoPci;
 
-impl CpuIoEnumerator {
+impl IoPci {
     const CONFIG_ADDRESS: u16 = 0xCF8;
     const CONFIG_DATA: u16 = 0xCFC;
 
-    fn get_addr(bus: u8, device: u8, func: u8, offset: u8) -> u32 {
+    pub fn get_addr(bus: u8, device: u8, func: u8, offset: u8) -> u32 {
         let lbus = bus as u32;
         let ldevice = device as u32;
         let lfunc = func as u32;
@@ -115,7 +110,7 @@ impl CpuIoEnumerator {
         address
     }
 
-    fn pci_read(bus: u8, device: u8, func: u8, offset: u8) -> u32 {
+    pub fn read(bus: u8, device: u8, func: u8, offset: u8) -> u32 {
         let address: u32 = Self::get_addr(bus, device, func, offset);
 
         let mut addr = Port::<u32>::new(Self::CONFIG_ADDRESS);
@@ -126,28 +121,44 @@ impl CpuIoEnumerator {
             data.read()
         }
     }
+
+    pub fn write(bus: u8, device: u8, func: u8, offset: u8, value: u32) {
+        let address: u32 = Self::get_addr(bus, device, func, offset);
+
+        let mut addr = Port::<u32>::new(Self::CONFIG_ADDRESS);
+        let mut data = Port::<u32>::new(Self::CONFIG_DATA);
+
+        unsafe {
+            addr.write(address);
+            data.write(value);
+        }
+    }
 }
 
-impl PciEnumerator for CpuIoEnumerator {
+impl PciEnumerator for IoPci {
     fn read_u8(&self, bus: u8, device: u8, function: u8, offset: u8) -> u8 {
-        (Self::pci_read(bus, device, function, offset) & 0xFF) as u8
+        (Self::read(bus, device, function, offset) & 0xFF) as u8
     }
 
     fn read_u16(&self, bus: u8, device: u8, function: u8, offset: u8) -> u16 {
-        (Self::pci_read(bus, device, function, offset) & 0xFFFF) as u16
+        (Self::read(bus, device, function, offset) & 0xFFFF) as u16
     }
 
     fn read_u32(&self, bus: u8, device: u8, function: u8, offset: u8) -> u32 {
-        Self::pci_read(bus, device, function, offset)
+        Self::read(bus, device, function, offset)
+    }
+
+    fn make_device(&self, id: u32, bus: u8, device: u8, function: u8) -> Result<PciDevice, String> {
+        PciDevice::new_pci(id, bus, device, function)
     }
 }
 
-pub struct McfgEnumerator<'a> {
+pub struct McfgPci<'a> {
     entry: &'a McfgEntry,
     bus_regions: Box<[OnceCell<MappedRegion>]>,
 }
 
-impl<'a> McfgEnumerator<'a> {
+impl<'a> McfgPci<'a> {
     pub fn new(entry: &'a McfgEntry) -> Self {
         let bus_count = (entry.bus_num_end - entry.bus_num_start + 1) as usize;
         Self {
@@ -167,7 +178,7 @@ impl<'a> McfgEnumerator<'a> {
         })
     }
 
-    fn read_raw(&self, bus: u8, device: u8, function: u8, offset: u8) -> u32 {
+    pub fn read_raw(&self, bus: u8, device: u8, function: u8, offset: u8) -> u32 {
         let region = self.get_bus_region(bus);
 
         let addr = region.virt().as_u64()
@@ -179,7 +190,7 @@ impl<'a> McfgEnumerator<'a> {
     }
 }
 
-impl PciEnumerator for McfgEnumerator<'_> {
+impl PciEnumerator for McfgPci<'_> {
     fn read_u8(&self, bus: u8, device: u8, function: u8, offset: u8) -> u8 {
         (self.read_raw(bus, device, function, offset) & 0xFF) as u8
     }
@@ -190,5 +201,9 @@ impl PciEnumerator for McfgEnumerator<'_> {
 
     fn read_u32(&self, bus: u8, device: u8, function: u8, offset: u8) -> u32 {
         self.read_raw(bus, device, function, offset)
+    }
+
+    fn make_device(&self, id: u32, bus: u8, device: u8, function: u8) -> Result<PciDevice, String> {
+        PciDevice::new_pcie(id, bus, device, function, *self.entry)
     }
 }
