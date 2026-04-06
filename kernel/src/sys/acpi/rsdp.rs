@@ -1,6 +1,4 @@
-use core::range::Range;
-
-use alloc::{borrow::ToOwned, slice, string::String};
+use alloc::{borrow::ToOwned, format, slice, string::String};
 
 const RSDP_SIGNATURE: [u8; 8] = *b"RSD PTR ";
 const RSDP_V1_LEN: usize = 20;
@@ -24,7 +22,11 @@ pub struct Rsdp {
 impl Rsdp {
     pub fn validate(&self) -> Result<(), String> {
         if self.signature != RSDP_SIGNATURE {
-            return Err("Detected incorrect RSDP signature".to_owned());
+            return Err(format!(
+                "Detected incorrect RSDP signature (found {} but expected {})",
+                str::from_utf8(&self.signature).unwrap(),
+                str::from_utf8(&RSDP_SIGNATURE).unwrap(),
+            ));
         }
 
         let length = if self.revision > 0 {

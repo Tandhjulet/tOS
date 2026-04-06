@@ -2,7 +2,7 @@ use crate::sys::acpi::Signature;
 
 pub mod mcfg;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 #[repr(C, packed)]
 pub struct SdtHeader {
     pub signature: Signature,

@@ -7,6 +7,7 @@ use x86_64::PhysAddr;
 
 use crate::{
     allocator::mmio::{self, MappedRegion},
+    println,
     sys::acpi::{rsdp::Rsdp, sdt::SdtHeader},
 };
 
@@ -49,16 +50,16 @@ impl Acpi {
 }
 
 pub struct AcpiTables {
-    rsdt: SdtHeader,
+    rsdt_region: MappedRegion,
     pub revision: u8,
 }
 
 impl AcpiTables {
     pub unsafe fn from_rsdp(raw_rsdp_addr: u64) -> Result<Self, String> {
         let rsdp_addr = PhysAddr::new(raw_rsdp_addr);
-        let rsdp_virt = mmio::map_mmio(rsdp_addr, size_of::<Rsdp>() as u64);
+        let rsdp_region = mmio::map_mmio(rsdp_addr, size_of::<Rsdp>() as u64);
 
-        let rsdp = unsafe { *rsdp_virt.as_ptr::<Rsdp>() };
+        let rsdp = unsafe { *rsdp_region.as_ptr::<Rsdp>() };
         rsdp.validate()?;
 
         let revision = rsdp.revision;
@@ -69,21 +70,27 @@ impl AcpiTables {
 
     pub unsafe fn from_rsdt(revision: u8, raw_rsdt_addr: u64) -> Result<Self, String> {
         let rsdt_addr = PhysAddr::new(raw_rsdt_addr);
-        let rsdt_virt = mmio::map_mmio(rsdt_addr, size_of::<SdtHeader>() as u64);
-        let rsdt = unsafe { *rsdt_virt.as_ptr::<SdtHeader>() };
+        let rsdt_region = mmio::map_mmio(rsdt_addr, size_of::<SdtHeader>() as u64);
+        let rsdt = unsafe { *rsdt_region.as_ptr::<SdtHeader>() };
 
-        let rsdt_virt = mmio::map_mmio(rsdt_addr, rsdt.length as u64);
-        let rsdt = unsafe { *rsdt_virt.as_ptr::<SdtHeader>() };
+        let rsdt_region = mmio::map_mmio(rsdt_addr, rsdt.length as u64);
 
-        Ok(Self { rsdt, revision })
+        Ok(Self {
+            rsdt_region,
+            revision,
+        })
+    }
+
+    pub fn rsdt(&self) -> &SdtHeader {
+        unsafe { &*self.rsdt_region.as_ptr::<SdtHeader>() }
     }
 
     pub fn table_entries(&self) -> impl Iterator<Item = usize> {
         let entry_size: usize = if self.revision == 0 { 4 } else { 8 };
-        let header_start = (&self.rsdt) as *const SdtHeader;
-        let mut entries_ptr = unsafe { header_start.byte_add(size_of::<SdtHeader>()).cast::<u8>() };
+        let header_start = self.rsdt_region.virt().as_ptr::<u8>();
+        let mut entries_ptr = unsafe { header_start.byte_add(size_of::<SdtHeader>()) };
 
-        let mut num_entries = (self.rsdt.length as usize - size_of::<SdtHeader>()) / entry_size;
+        let mut num_entries = (self.rsdt().length as usize - size_of::<SdtHeader>()) / entry_size;
 
         iter::from_fn(move || {
             if num_entries > 0 {
@@ -111,6 +118,8 @@ impl AcpiTables {
 
             let header_region = mmio::map_mmio(phys_addr, size_of::<SdtHeader>() as u64);
             let header = unsafe { &*header_region.as_ptr::<SdtHeader>() };
+
+            println!("header: {:?}", header);
 
             if header.signature == T::SIGNATURE {
                 let len = header.length;
@@ -151,7 +160,7 @@ impl<T: AcpiTable> MappedTable<T> {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 #[repr(transparent)]
 pub struct Signature([u8; 4]);
 

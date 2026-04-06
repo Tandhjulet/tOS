@@ -36,25 +36,23 @@ pub fn alloc_dma_region(size: u64) -> MappedRegion {
 }
 
 pub fn map_mmio(phys_addr: PhysAddr, size: u64) -> MappedRegion {
-    let aligned_size = (size + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+    let phys_start = phys_addr.align_down(PAGE_SIZE);
+    let offset = phys_addr.as_u64() - phys_start.as_u64();
+
+    // align size to account for offset too
+    let aligned_size = (size + offset + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
 
     let virt_start =
         VirtAddr::new(NEXT_MMIO.fetch_add(aligned_size, core::sync::atomic::Ordering::SeqCst));
-
-    let phys_start = phys_addr.align_down(PAGE_SIZE);
 
     let res = map_mmio_region(phys_start, virt_start, aligned_size);
     if let Err(e) = res {
         panic!("Failed to map MMIO region: {:?}", e);
     }
 
-    // if the phys_addr was not page aligned, we need to
-    // add the offset to the virt start
-    let offset = phys_addr.as_u64() & (PAGE_SIZE - 1);
-    let virt = virt_start + offset;
-
     MappedRegion {
-        virt,
+        virt: virt_start + offset,
+        virt_mapped: virt_start,
         phys: phys_start,
         len: aligned_size,
     }
@@ -113,6 +111,7 @@ fn unmap_mmio_region(virt_start: VirtAddr, size: u64) {
 pub struct MappedRegion {
     virt: VirtAddr,
     phys: PhysAddr,
+    virt_mapped: VirtAddr,
 
     len: u64,
 }
@@ -141,6 +140,6 @@ impl MappedRegion {
 
 impl Drop for MappedRegion {
     fn drop(&mut self) {
-        unmap_mmio_region(self.virt(), self.len());
+        unmap_mmio_region(self.virt_mapped, self.len);
     }
 }
