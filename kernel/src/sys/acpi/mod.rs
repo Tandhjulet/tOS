@@ -167,6 +167,7 @@ pub struct Signature([u8; 4]);
 impl Signature {
     pub const MCFG: Signature = Signature(*b"MCFG");
     pub const FADT: Signature = Signature(*b"FADT");
+    pub const MADT: Signature = Signature(*b"ACPI");
 }
 
 #[repr(C, packed)]
