@@ -5,7 +5,7 @@ use core::{
 
 use num_enum::TryFromPrimitive;
 
-use crate::sys::acpi::sdt::SdtHeader;
+use crate::{println, sys::acpi::sdt::SdtHeader};
 
 #[repr(C, packed)]
 pub struct Madt {
@@ -38,21 +38,56 @@ pub struct MadtEntryIter<'a> {
     _phantom: PhantomData<&'a ()>,
 }
 
-#[derive(TryFromPrimitive, Clone, Copy)]
+/**
+ * See UEFI documentation at
+ * https://uefi.org/specs/ACPI/6.5/05_ACPI_Software_Programming_Model.html#multiple-apic-description-table-madt
+ */
+#[derive(TryFromPrimitive, Clone, Copy, Debug)]
 #[repr(u8)]
 pub enum MadtEntryKind {
     LocalApic = 0,
     IoApic = 1,
+    InterruptSourceOverride = 2,
+    NmiSource = 3,
+    LocalApicNmi = 4,
+    LocalApicAddressOverride = 5,
+    IoSapic = 6,
+    LocalSapic = 7,
+    PlatformInterruptSources = 8,
+    Local2Apic = 9,
+    Local2ApicNvmi = 0xA,
+    GicCpu = 0xB,
+    GicDist = 0xC,
+    GicMsi = 0xD,
+    GicRedist = 0xE,
+    GicIts = 0xF,
+    MultiprocessorWakeup = 0x10,
+    CorePic = 0x11,
+    LioPic = 0x12,
+    HtPic = 0x13,
+    EioPic = 0x14,
+    MsiPic = 0x15,
+    BioPic = 0x16,
+    LpcPic = 0x17,
 }
 
 impl<'a> MadtEntryKind {
-    pub unsafe fn to_entry(&self, ptr: *const u8) -> MadtEntry<'a> {
-        match self {
+    pub unsafe fn to_entry(&self, ptr: *const u8) -> Option<MadtEntry<'a>> {
+        let entry = match self {
             MadtEntryKind::LocalApic => {
                 MadtEntry::LocalApic(unsafe { &*(ptr as *const LocalApicEntry) })
             }
             MadtEntryKind::IoApic => MadtEntry::IoApic(unsafe { &*(ptr as *const IoApicEntry) }),
-        }
+            kind => {
+                println!(
+                    "Skipping converting unimplemented kind {:?} to MadtEntry",
+                    kind
+                );
+                return None;
+            }
+        };
+
+        Some(entry)
     }
 }
 
@@ -60,6 +95,25 @@ impl<'a> MadtEntryKind {
 pub enum MadtEntry<'a> {
     LocalApic(&'a LocalApicEntry),
     IoApic(&'a IoApicEntry),
+    InterruptSourceOverride,
+    NmiSource,
+    LocalApicNmi,
+    LocalApicAddressOverride,
+    Local2Apic,
+    Local2ApicNmi,
+    GicCpu,
+    GicDist,
+    GicMsi,
+    GicRedist,
+    GicIts,
+    MultiprocessorWakeup,
+    CorePic,
+    LioPic,
+    HtPic,
+    EioPic,
+    MsiPic,
+    BioPic,
+    LpcPic,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -88,7 +142,11 @@ impl<'a> Iterator for MadtEntryIter<'a> {
             };
 
             let entry = unsafe { kind.to_entry(entry_ptr) };
-            return Some(entry);
+            if entry.is_none() {
+                continue;
+            }
+
+            return entry;
         }
 
         None
