@@ -1,5 +1,6 @@
 use crate::sys::acpi::Signature;
 
+pub mod fadt;
 pub mod mcfg;
 
 #[derive(Clone, Copy, Debug)]
