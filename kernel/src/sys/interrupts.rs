@@ -51,6 +51,7 @@ pub struct IoApicInfo {
     pub id: u8,
     pub addr: u32,
     pub gsi_base: u32,
+    pub nmis: Vec<IoApicNmi>,
 }
 
 pub struct IntSourceOverride {
@@ -61,8 +62,24 @@ pub struct IntSourceOverride {
 }
 
 pub struct CpuInfo {
+    pub processor_id: u8,
     pub apic_id: u8,
     pub flags: u32,
+    pub nmis: Vec<LapicNmi>,
+}
+
+#[derive(Clone, Copy)]
+pub struct LapicNmi {
+    pub flags: u16,
+    pub lint: u8,
+}
+
+#[derive(Clone, Copy)]
+pub struct IoApicNmi {
+    pub nmi_src: u8,
+    _reserved: u8,
+    pub flags: u16,
+    pub gsi: u32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -139,8 +156,10 @@ pub fn try_init_apic() -> Result<(), &'static str> {
         match entry {
             MadtEntry::LocalApic(cpu) => {
                 apic_info.cpus.push(CpuInfo {
+                    processor_id: cpu.acpi_processor_id,
                     apic_id: cpu.apic_id,
                     flags: cpu.flags,
+                    nmis: Vec::new(),
                 });
             }
             MadtEntry::IoApic(io) => {
@@ -148,6 +167,7 @@ pub fn try_init_apic() -> Result<(), &'static str> {
                     id: io.io_apic_id,
                     addr: io.io_apic_addr,
                     gsi_base: io.gsi_base,
+                    nmis: Vec::new(),
                 });
             }
             MadtEntry::InterruptSourceOverride(iso) => {
@@ -158,7 +178,34 @@ pub fn try_init_apic() -> Result<(), &'static str> {
                     flags: iso.flags,
                 });
             }
-            MadtEntry::LocalApicNmi(local_apic_nmi_entry) => {}
+            MadtEntry::LocalApicNmi(nmi) => {
+                let lapic_nmi = LapicNmi {
+                    flags: nmi.flags,
+                    lint: nmi.lint,
+                };
+
+                if nmi.acpi_processor_id == 0xFF {
+                    apic_info.cpus.iter_mut().for_each(|cpu| {
+                        cpu.nmis.push(lapic_nmi.clone());
+                    });
+
+                    continue;
+                }
+
+                let Some(cpu) = apic_info
+                    .cpus
+                    .iter_mut()
+                    .find(|cpu| cpu.processor_id == nmi.acpi_processor_id)
+                else {
+                    println!(
+                        "Received Local APIC NMI for CPU with id {} but could not find it.",
+                        { nmi.acpi_processor_id }
+                    );
+                    continue;
+                };
+
+                cpu.nmis.push(lapic_nmi);
+            }
         }
     }
 
