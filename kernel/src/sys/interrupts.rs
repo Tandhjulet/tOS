@@ -1,4 +1,13 @@
-use crate::{hlt_loop, println, sys::gdt};
+use crate::{
+    hlt_loop, println,
+    sys::{
+        acpi::{
+            ACPI,
+            sdt::{madt::Madt, mcfg::Mcfg},
+        },
+        gdt,
+    },
+};
 use bootloader_api::BootInfo;
 use pic8259::ChainedPics;
 use spin::Mutex;
@@ -67,7 +76,22 @@ pub fn load_idt() {
     idt_static.load();
 }
 
-pub fn setup_msi(_boot_info: &'static BootInfo) {}
+pub fn try_init_apic() -> Result<(), &'static str> {
+    let acpi = ACPI.get().ok_or("Failed to find ACPI")?;
+    let madt_table = acpi
+        .tables()
+        .find_table::<Madt>()
+        .ok_or("Failed to find MADT table in ACPI")?;
+
+    let madt = madt_table.get();
+    let entries = madt.entries();
+
+    for entry in entries {
+        println!("entry: {:?}", entry);
+    }
+
+    Ok(())
+}
 
 extern "x86-interrupt" fn page_fault_handler(
     stack_frame: InterruptStackFrame,

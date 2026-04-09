@@ -5,7 +5,10 @@ use core::{
 
 use num_enum::TryFromPrimitive;
 
-use crate::{println, sys::acpi::sdt::SdtHeader};
+use crate::{
+    println,
+    sys::acpi::{AcpiTable, Signature, sdt::SdtHeader},
+};
 
 #[repr(C, packed)]
 pub struct Madt {
@@ -28,6 +31,14 @@ impl<'a> Madt {
             remaining_length: self.header.length - (MADT_SIZE as u32),
             _phantom: PhantomData,
         }
+    }
+}
+
+unsafe impl AcpiTable for Madt {
+    const SIGNATURE: Signature = Signature::MADT;
+
+    fn header(&self) -> &SdtHeader {
+        &self.header
     }
 }
 
@@ -78,6 +89,12 @@ impl<'a> MadtEntryKind {
                 MadtEntry::LocalApic(unsafe { &*(ptr as *const LocalApicEntry) })
             }
             MadtEntryKind::IoApic => MadtEntry::IoApic(unsafe { &*(ptr as *const IoApicEntry) }),
+            MadtEntryKind::InterruptSourceOverride => {
+                MadtEntry::InterruptSourceOverride(unsafe { &*(ptr as *const IntSrcOverrideEntry) })
+            }
+            MadtEntryKind::LocalApicNmi => {
+                MadtEntry::LocalApicNmi(unsafe { &*(ptr as *const LocalApicNmiEntry) })
+            }
             kind => {
                 println!(
                     "Skipping converting unimplemented kind {:?} to MadtEntry",
@@ -95,9 +112,9 @@ impl<'a> MadtEntryKind {
 pub enum MadtEntry<'a> {
     LocalApic(&'a LocalApicEntry),
     IoApic(&'a IoApicEntry),
-    InterruptSourceOverride,
+    InterruptSourceOverride(&'a IntSrcOverrideEntry),
     NmiSource,
-    LocalApicNmi,
+    LocalApicNmi(&'a LocalApicNmiEntry),
     LocalApicAddressOverride,
     Local2Apic,
     Local2ApicNmi,
@@ -154,6 +171,7 @@ impl<'a> Iterator for MadtEntryIter<'a> {
 }
 
 #[derive(Debug)]
+#[repr(C, packed)]
 pub struct LocalApicEntry {
     pub header: EntryHeader,
     pub acpi_processor_id: u8,
@@ -162,10 +180,30 @@ pub struct LocalApicEntry {
 }
 
 #[derive(Debug)]
+#[repr(C, packed)]
 pub struct IoApicEntry {
     pub header: EntryHeader,
     pub io_apic_id: u8,
     _reserved: u8,
     pub io_apic_addr: u64,
     pub gsi_base: u64,
+}
+
+#[derive(Debug)]
+#[repr(C, packed)]
+pub struct IntSrcOverrideEntry {
+    pub header: EntryHeader,
+    pub bus_src: u8,
+    pub bus_irq: u8,
+    pub gsi: u32,
+    pub flags: u16,
+}
+
+#[derive(Debug)]
+#[repr(C, packed)]
+pub struct LocalApicNmiEntry {
+    pub header: EntryHeader,
+    pub acpi_processor_id: u8,
+    pub flags: u16,
+    pub lint: u8,
 }

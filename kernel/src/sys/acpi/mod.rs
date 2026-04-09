@@ -1,4 +1,4 @@
-use core::{iter, marker::PhantomData};
+use core::{iter, marker::PhantomData, pin::Pin};
 
 use alloc::{borrow::ToOwned, string::String};
 use bootloader_api::info::Optional;
@@ -119,8 +119,6 @@ impl AcpiTables {
             let header_region = mmio::map_mmio(phys_addr, size_of::<SdtHeader>() as u64);
             let header = unsafe { &*header_region.as_ptr::<SdtHeader>() };
 
-            println!("header: {:?}", header);
-
             if header.signature == T::SIGNATURE {
                 let len = header.length;
 
@@ -151,6 +149,18 @@ pub struct MappedTable<T: AcpiTable> {
 }
 
 impl<T: AcpiTable> MappedTable<T> {
+    pub fn get(&self) -> Pin<&T> {
+        unsafe { Pin::new_unchecked(self.as_ref()) }
+    }
+
+    pub unsafe fn as_ref(&self) -> &T {
+        unsafe { &*self.region.as_ptr() }
+    }
+
+    pub unsafe fn as_mut_ref(&self) -> &mut T {
+        unsafe { &mut *self.region.as_mut_ptr() }
+    }
+
     pub fn as_ptr(&self) -> *const T {
         self.region.as_ptr()
     }
@@ -167,7 +177,7 @@ pub struct Signature([u8; 4]);
 impl Signature {
     pub const MCFG: Signature = Signature(*b"MCFG");
     pub const FADT: Signature = Signature(*b"FADT");
-    pub const MADT: Signature = Signature(*b"ACPI");
+    pub const MADT: Signature = Signature(*b"APIC");
 }
 
 #[repr(C, packed)]

@@ -12,7 +12,7 @@ use kernel::{
         pci,
     },
     sys::{
-        acpi::Acpi,
+        acpi::{ACPI, Acpi},
         interrupts,
         task::{Task, executor::Executor, keyboard},
     },
@@ -39,7 +39,11 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         error!("ACPI: {}", msg);
     }
 
-    pci::init();
+    if let Err(msg) = interrupts::try_init_apic() {
+        error!("APIC: {}", msg);
+    }
+
+    // pci::init();
 
     // networking::init();
     // filesystem::init();
