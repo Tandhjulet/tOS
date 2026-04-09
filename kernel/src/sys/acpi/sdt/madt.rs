@@ -14,7 +14,7 @@ use crate::{
 pub struct Madt {
     pub header: SdtHeader,
 
-    pub apic_addr: u32,
+    pub lapic_addr: u32,
     pub flags: u32,
 
     _pinned: PhantomPinned,
@@ -93,7 +93,7 @@ impl<'a> MadtEntryKind {
                 MadtEntry::InterruptSourceOverride(unsafe { &*(ptr as *const IntSrcOverrideEntry) })
             }
             MadtEntryKind::LocalApicNmi => {
-                MadtEntry::LocalApicNmi(unsafe { &*(ptr as *const LocalApicNmiEntry) })
+                MadtEntry::LocalApicNmi(unsafe { &*(ptr as *const LapicNmiEntry) })
             }
             kind => {
                 println!(
@@ -113,24 +113,24 @@ pub enum MadtEntry<'a> {
     LocalApic(&'a LocalApicEntry),
     IoApic(&'a IoApicEntry),
     InterruptSourceOverride(&'a IntSrcOverrideEntry),
-    NmiSource,
-    LocalApicNmi(&'a LocalApicNmiEntry),
-    LocalApicAddressOverride,
-    Local2Apic,
-    Local2ApicNmi,
-    GicCpu,
-    GicDist,
-    GicMsi,
-    GicRedist,
-    GicIts,
-    MultiprocessorWakeup,
-    CorePic,
-    LioPic,
-    HtPic,
-    EioPic,
-    MsiPic,
-    BioPic,
-    LpcPic,
+    // NmiSource,
+    LocalApicNmi(&'a LapicNmiEntry),
+    // LocalApicAddressOverride,
+    // Local2Apic,
+    // Local2ApicNmi,
+    // GicCpu,
+    // GicDist,
+    // GicMsi,
+    // GicRedist,
+    // GicIts,
+    // MultiprocessorWakeup,
+    // CorePic,
+    // LioPic,
+    // HtPic,
+    // EioPic,
+    // MsiPic,
+    // BioPic,
+    // LpcPic,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -185,8 +185,8 @@ pub struct IoApicEntry {
     pub header: EntryHeader,
     pub io_apic_id: u8,
     _reserved: u8,
-    pub io_apic_addr: u64,
-    pub gsi_base: u64,
+    pub io_apic_addr: u32,
+    pub gsi_base: u32,
 }
 
 #[derive(Debug)]
@@ -201,7 +201,7 @@ pub struct IntSrcOverrideEntry {
 
 #[derive(Debug)]
 #[repr(C, packed)]
-pub struct LocalApicNmiEntry {
+pub struct LapicNmiEntry {
     pub header: EntryHeader,
     pub acpi_processor_id: u8,
     pub flags: u16,

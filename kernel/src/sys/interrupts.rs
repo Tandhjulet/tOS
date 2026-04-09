@@ -3,12 +3,12 @@ use crate::{
     sys::{
         acpi::{
             ACPI,
-            sdt::{madt::Madt, mcfg::Mcfg},
+            sdt::madt::{Madt, MadtEntry},
         },
         gdt,
     },
 };
-use bootloader_api::BootInfo;
+use alloc::vec::Vec;
 use pic8259::ChainedPics;
 use spin::Mutex;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
@@ -19,6 +19,51 @@ pub const PIC_2_OFFSET: u8 = PIC_1_OFFSET + 8;
 
 pub static PICS: spin::Mutex<ChainedPics> =
     spin::Mutex::new(unsafe { ChainedPics::new(PIC_1_OFFSET, PIC_2_OFFSET) });
+
+pub static INTERRUPT_CONTROLLER: Mutex<InterruptType> = Mutex::new(InterruptType::Pic(unsafe {
+    ChainedPics::new(PIC_1_OFFSET, PIC_2_OFFSET)
+}));
+
+pub enum InterruptType {
+    Apic(ApicInfo),
+    Pic(ChainedPics),
+}
+
+pub struct ApicInfo {
+    pub lapic_addr: u32,
+    pub ioapics: Vec<IoApicInfo>,
+    pub iso: Vec<IntSourceOverride>,
+    pub cpus: Vec<CpuInfo>,
+}
+
+impl ApicInfo {
+    pub fn new(lapic_addr: u32) -> Self {
+        Self {
+            lapic_addr,
+            ioapics: Vec::new(),
+            iso: Vec::new(),
+            cpus: Vec::new(),
+        }
+    }
+}
+
+pub struct IoApicInfo {
+    pub id: u8,
+    pub addr: u32,
+    pub gsi_base: u32,
+}
+
+pub struct IntSourceOverride {
+    pub bus: u8,
+    pub bus_irq: u8,
+    pub gsi: u32,
+    pub flags: u16,
+}
+
+pub struct CpuInfo {
+    pub apic_id: u8,
+    pub flags: u32,
+}
 
 #[derive(Debug, Clone, Copy)]
 #[repr(u8)]
@@ -83,11 +128,38 @@ pub fn try_init_apic() -> Result<(), &'static str> {
         .find_table::<Madt>()
         .ok_or("Failed to find MADT table in ACPI")?;
 
-    let madt = madt_table.get();
-    let entries = madt.entries();
+    unsafe { PICS.lock().disable() };
 
+    let madt = madt_table.get();
+
+    let mut apic_info = ApicInfo::new(madt.lapic_addr);
+
+    let entries = madt.entries();
     for entry in entries {
-        println!("entry: {:?}", entry);
+        match entry {
+            MadtEntry::LocalApic(cpu) => {
+                apic_info.cpus.push(CpuInfo {
+                    apic_id: cpu.apic_id,
+                    flags: cpu.flags,
+                });
+            }
+            MadtEntry::IoApic(io) => {
+                apic_info.ioapics.push(IoApicInfo {
+                    id: io.io_apic_id,
+                    addr: io.io_apic_addr,
+                    gsi_base: io.gsi_base,
+                });
+            }
+            MadtEntry::InterruptSourceOverride(iso) => {
+                apic_info.iso.push(IntSourceOverride {
+                    bus: iso.bus_src,
+                    bus_irq: iso.bus_irq,
+                    gsi: iso.gsi,
+                    flags: iso.flags,
+                });
+            }
+            MadtEntry::LocalApicNmi(local_apic_nmi_entry) => {}
+        }
     }
 
     Ok(())
