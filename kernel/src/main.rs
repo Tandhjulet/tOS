@@ -15,30 +15,32 @@ use kernel::{
         task::{Task, executor::Executor, keyboard},
     },
 };
-use log::info;
+use log::{error, info};
 
 extern crate alloc;
 
 pub static BOOTLOADER_CONFIG: BootloaderConfig = {
     let mut config = BootloaderConfig::new_default();
     config.mappings.physical_memory = Some(Mapping::Dynamic);
+    config.kernel_stack_size = 512 * 1024;
     config
 };
 
 entry_point!(kernel_main, config = &BOOTLOADER_CONFIG);
 
 fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
-    init_framebuffer(boot_info);
-
     sys::gdt::init();
 
-    interrupts::load_idt();
-
+    init_framebuffer(boot_info);
     allocator::init(boot_info).expect("heap initialization failed");
 
-    println!("enabling interrupts!");
+    if let Err(msg) = interrupts::init() {
+        error!("INTERRUPT: {}", msg);
+    }
+
     x86_64::instructions::interrupts::enable();
-    println!("enabled!");
+
+    println!("A!");
 
     // if let Err(msg) = Acpi::try_init(boot_info.rsdp_addr) {
     //     error!("ACPI: {}", msg);
@@ -55,14 +57,18 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // networking::init();
     // filesystem::init();
 
-    interrupts::load_idt();
+    info!("info 2!");
 
-    let mut executor = Executor::new();
-    executor.spawn(Task::new(network_rx_task()));
-    executor.spawn(Task::new(network_tx_task()));
-    executor.spawn(Task::new(kernel_main_task()));
-    executor.spawn(Task::new(keyboard::print_keypresses()));
-    executor.run();
+    // let mut executor = Executor::new();
+    // executor.spawn(Task::new(network_rx_task()));
+    // executor.spawn(Task::new(network_tx_task()));
+    // executor.spawn(Task::new(kernel_main_task()));
+    // executor.spawn(Task::new(keyboard::print_keypresses()));
+    // executor.run();
+
+    loop {
+        info!("info!");
+    }
 }
 
 async fn kernel_main_task() {

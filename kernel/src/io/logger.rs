@@ -2,6 +2,7 @@ use bootloader_api::info::FrameBufferInfo;
 use conquer_once::spin::OnceCell;
 use core::fmt::Write;
 use spin::Mutex;
+use x86_64::instructions::interrupts::without_interrupts;
 
 use crate::io::frame_buffer::FrameBufferWriter;
 
@@ -31,10 +32,12 @@ impl log::Log for LockedLogger {
     }
 
     fn log(&self, record: &log::Record) {
-        if let Some(framebuffer) = &self.frame_buf_writer {
-            let mut frame_buffer = framebuffer.lock();
-            writeln!(frame_buffer, "{:5}: {}", record.level(), record.args()).unwrap();
-        }
+        without_interrupts(|| {
+            if let Some(framebuffer) = &self.frame_buf_writer {
+                let mut frame_buffer = framebuffer.lock();
+                writeln!(frame_buffer, "{:5}: {}", record.level(), record.args()).unwrap();
+            }
+        })
     }
 
     fn flush(&self) {}

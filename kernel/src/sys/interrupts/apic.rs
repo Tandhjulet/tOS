@@ -301,6 +301,7 @@ impl IoApicInfo {
     }
 }
 
+#[derive(Clone, Copy)]
 pub struct IntSourceOverride {
     pub bus: u8,
     pub bus_irq: u8,

@@ -1,5 +1,5 @@
 use crate::{
-    helpers, hlt_loop, println,
+    hlt_loop, println,
     sys::{
         acpi::{
             ACPI,
@@ -46,9 +46,7 @@ impl InterruptController {
     }
 
     pub fn eoi(&self, id: u8) {
-        println!("eoi sending...");
         self.get().eoi(id);
-        println!("eoi sent!");
     }
 
     pub fn switch_controller(&self, new_int_type: InterruptType) {
@@ -105,10 +103,12 @@ impl InterruptType {
     pub fn init(&self) {
         match self {
             InterruptType::Apic(info) => {
-                unsafe { info.lock().lapic.enable() };
+                let mut info = info.lock();
+                unsafe { info.lapic.enable() };
 
-                for ioapic in &mut info.lock().ioapics {
-                    unsafe { ioapic.init(&info.lock().iso) };
+                let iso = info.iso.clone();
+                for ioapic in &mut info.ioapics {
+                    unsafe { ioapic.init(&iso) };
                 }
             }
             InterruptType::Pic(pics) => unsafe {
@@ -128,21 +128,11 @@ pub enum InterruptIndex {
     Keyboard,
 }
 
-impl InterruptIndex {
-    fn as_u8(self) -> u8 {
-        self as u8
-    }
-
-    fn as_usize(self) -> usize {
-        usize::from(self.as_u8())
-    }
-}
-
 seq!(N in 32..=255 {
     extern "x86-interrupt" fn irq_handler_~N(_: InterruptStackFrame) {
         if let Some(f) = HANDLERS.lock()[N - 32] {
             match f() {
-                IrqResult::NoEoi => INTERRUPT_CONTROLLER.eoi(N as u8),
+                IrqResult::EoiNeeded => INTERRUPT_CONTROLLER.eoi(N as u8),
                 IrqResult::EoiSent => {},
             }
         }
@@ -154,7 +144,7 @@ seq!(N in 32..=255 {
 
 pub enum IrqResult {
     EoiSent,
-    NoEoi,
+    EoiNeeded,
 }
 
 pub static HANDLERS: Mutex<[Option<fn() -> IrqResult>; 256 - 32]> = Mutex::new([None; 256 - 32]);
@@ -182,16 +172,25 @@ pub fn load_idt() {
     IDT.load();
 }
 
-pub fn init() {
-    register_handler(InterruptIndex::Timer.as_u8(), timer_interrupt_handler);
-    register_handler(InterruptIndex::Keyboard.as_u8(), keyboard_interrupt_handler);
-
+pub fn init() -> Result<(), String> {
     load_idt();
     INTERRUPT_CONTROLLER.init();
+
+    register_handler(InterruptIndex::Timer as u8, timer_interrupt_handler);
+    // register_handler(InterruptIndex::Keyboard as u8, keyboard_interrupt_handler);
+
+    enable_irq(InterruptIndex::Timer as u8)?;
+    // enable_irq(InterruptIndex::Keyboard as u8)?;
+
+    Ok(())
 }
 
 pub fn register_handler(vector: u8, handler: fn() -> IrqResult) {
-    HANDLERS.lock()[vector as usize - 32] = Some(handler);
+    without_interrupts(|| HANDLERS.lock()[vector as usize - MIN_INTERRUPT] = Some(handler))
+}
+
+pub fn enable_irq(vector: u8) -> Result<(), String> {
+    without_interrupts(|| INTERRUPT_CONTROLLER.unmask_irq(vector - MIN_INTERRUPT as u8))
 }
 
 pub fn try_init_apic() -> Result<(), &'static str> {
@@ -287,8 +286,7 @@ extern "x86-interrupt" fn page_fault_handler(
 }
 
 fn timer_interrupt_handler() -> IrqResult {
-    println!("timer!");
-    IrqResult::NoEoi
+    IrqResult::EoiNeeded
 }
 
 fn keyboard_interrupt_handler() -> IrqResult {
@@ -298,7 +296,9 @@ fn keyboard_interrupt_handler() -> IrqResult {
     let scancode: u8 = unsafe { port.read() };
     crate::sys::task::keyboard::add_scancode(scancode);
 
-    IrqResult::NoEoi
+    println!("press!");
+
+    IrqResult::EoiNeeded
 }
 
 extern "x86-interrupt" fn breakpoint_handler(stack_frame: InterruptStackFrame) {
