@@ -7,7 +7,6 @@ use x86_64::PhysAddr;
 
 use crate::{
     allocator::mmio::{self, MappedRegion},
-    println,
     sys::acpi::{rsdp::Rsdp, sdt::SdtHeader},
 };
 

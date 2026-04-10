@@ -2,8 +2,9 @@ use alloc::vec::Vec;
 use x86_64::{instructions::interrupts::without_interrupts, structures::idt::InterruptStackFrame};
 
 use crate::{
-    interrupts::{MIN_INTERRUPT, PICS},
+    interrupts::MIN_INTERRUPT,
     io::net::{MacAddr, NETWORK_DRIVER, RX_WAKER},
+    sys::interrupts::INTERRUPT_CONTROLLER,
 };
 
 pub mod e1000;
@@ -28,10 +29,8 @@ impl dyn NetworkDriver {
             driver.get_interrupt_line()
         };
 
-        unsafe {
-            let remapped_line = irq_line + (MIN_INTERRUPT as u8);
-            PICS.lock().notify_end_of_interrupt(remapped_line);
-        }
+        let remapped_line = irq_line + (MIN_INTERRUPT as u8);
+        INTERRUPT_CONTROLLER.eoi(remapped_line);
 
         RX_WAKER.wake();
     }

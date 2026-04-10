@@ -15,7 +15,10 @@ use core::panic::PanicInfo;
 
 use bootloader_api::info::FrameBufferInfo;
 
-use crate::{io::logger::LockedLogger, sys::interrupts};
+use crate::{
+    io::logger::LockedLogger,
+    sys::interrupts::{self, INTERRUPT_CONTROLLER},
+};
 
 extern crate alloc;
 
@@ -23,7 +26,7 @@ pub fn init() {
     sys::gdt::init();
 
     interrupts::init_idt();
-    interrupts::init_pics();
+    INTERRUPT_CONTROLLER.init();
 
     x86_64::instructions::interrupts::enable();
 }

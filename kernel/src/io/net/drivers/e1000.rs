@@ -11,12 +11,13 @@ use x86_64::{instructions::interrupts::without_interrupts, structures::idt::Inte
 	*/
 use crate::{
     allocator::mmio::{MappedRegion, alloc_dma_region},
-    interrupts::{IDT, MIN_INTERRUPT, PICS},
+    interrupts::{IDT, MIN_INTERRUPT},
     io::{
         net::{MacAddr, RX_QUEUE, drivers::NetworkDriver},
         pci::{PciDevice, bar::BarKind},
     },
     println,
+    sys::interrupts::INTERRUPT_CONTROLLER,
 };
 
 #[allow(unused)]
@@ -502,15 +503,7 @@ impl NetworkDriver for E1000 {
             IDT.lock()[(self.interrupt_line as usize) + MIN_INTERRUPT]
                 .set_handler_fn(<dyn NetworkDriver>::fire);
 
-            let mut pics = PICS.lock();
-            unsafe {
-                let [master, slave] = pics.read_masks();
-                if self.interrupt_line < 8 {
-                    pics.write_masks(master & !(1u8 << self.interrupt_line), slave);
-                } else {
-                    pics.write_masks(master, slave & !(1u8 << (self.interrupt_line - 8)));
-                }
-            };
+            INTERRUPT_CONTROLLER.unmask_irq(self.interrupt_line);
         });
 
         self.enable_interrupts();
