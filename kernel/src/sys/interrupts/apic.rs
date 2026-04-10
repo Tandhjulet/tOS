@@ -58,8 +58,75 @@ impl Lapic {
     }
 }
 
+#[derive(PartialEq, Eq, Clone, Copy)]
+#[repr(u8)]
+pub enum TriggerMode {
+    Edge = 0,
+    Level = 1,
+}
+
+#[derive(PartialEq, Eq, Clone, Copy)]
+#[repr(u8)]
+pub enum PinPolarity {
+    ActiveHigh = 0,
+    ActiveLow = 1,
+}
+
+#[derive(PartialEq, Eq, Clone, Copy)]
+#[repr(u8)]
+pub enum DeliveryMode {
+    Fixed = 0b000,
+    LowestPriority = 0b001,
+    Smi = 0b010,
+    Nmi = 0b100,
+    Init = 0b101,
+    ExtInt = 0b111,
+}
+
+#[derive(PartialEq, Eq, Clone, Copy)]
+#[repr(u8)]
+pub enum DestinationMode {
+    Physical = 0,
+    Logical = 1,
+}
+
+pub struct RedirectionEntry(pub u64);
+
+impl RedirectionEntry {
+    pub fn new(
+        vector: u8,
+        delivery: DeliveryMode,
+        dest_mode: DestinationMode,
+        pin_polary: PinPolarity,
+        trigger_mode: TriggerMode,
+        masked: bool,
+        dest: u8,
+    ) -> Self {
+        let mut raw = 0u64;
+        raw |= vector as u64;
+        raw |= ((delivery as u64) & 0b111) << 8;
+        raw |= ((dest_mode as u64) & 0b1) << 11;
+        // Bit 12: delivery status
+        raw |= ((pin_polary as u64) & 0b1) << 13;
+        // Bit 14: remote IRR
+        raw |= ((trigger_mode as u64) & 0b1) << 15;
+        if masked {
+            raw |= 1 << 16;
+        }
+
+        let dest_field = if dest_mode == DestinationMode::Physical {
+            dest & 0b1111
+        } else {
+            dest
+        };
+        raw |= (dest_field as u64) << 56;
+
+        Self(raw as u64)
+    }
+}
+
 pub struct IoApicInfo {
-    pub id: u8,
+    pub apic_id: u8,
     pub region: MappedRegion,
     pub gsi_base: u32,
     pub ver: u8,
@@ -86,7 +153,7 @@ impl IoApicInfo {
         let redirection_cnt = (entry_cnt >> 16) as u8 + 1;
 
         Self {
-            id,
+            apic_id: id,
             region,
             gsi_base,
             redirection_cnt,
@@ -108,12 +175,23 @@ impl IoApicInfo {
 
         for o in isa_overrides {
             let idx = (o.gsi - gsi_base) as u8;
-            self.write_redirect_entry(idx);
+            self.write_redirect_entry(
+                idx,
+                RedirectionEntry::new(
+                    0,
+                    DeliveryMode::Fixed,
+                    DestinationMode::Physical,
+                    PinPolarity::ActiveHigh, // TODO: parse fom iso
+                    TriggerMode::Edge,       // TODO: parse from iso
+                    true,
+                    self.apic_id,
+                ),
+            );
         }
     }
 
-    pub fn write_redirect_entry(&mut self, index: u8) {}
-    pub fn read_redirect_entry(&mut self) {}
+    pub fn write_redirect_entry(&mut self, idx: u8, entry: RedirectionEntry) {}
+    pub fn read_redirect_entry(&mut self, idx: u8) {}
 
     pub unsafe fn read(region: &MappedRegion, reg: u8) -> u32 {
         let ptr = region.as_mut_ptr::<u32>();
