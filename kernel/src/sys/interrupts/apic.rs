@@ -1,7 +1,11 @@
-use alloc::vec::Vec;
+use alloc::{format, string::String, vec::Vec};
+use log::error;
 use x86_64::PhysAddr;
 
-use crate::allocator::mmio::{MappedRegion, map_mmio};
+use crate::{
+    allocator::mmio::{MappedRegion, map_mmio},
+    sys::interrupts::MIN_INTERRUPT,
+};
 
 pub struct ApicInfo {
     pub lapic: Lapic,
@@ -123,6 +127,14 @@ impl RedirectionEntry {
 
         Self(raw as u64)
     }
+
+    pub fn low(&self) -> u32 {
+        self.0 as u32
+    }
+
+    pub fn high(&self) -> u32 {
+        (self.0 >> 32) as u32
+    }
 }
 
 pub struct IoApicInfo {
@@ -175,23 +187,63 @@ impl IoApicInfo {
 
         for o in isa_overrides {
             let idx = (o.gsi - gsi_base) as u8;
-            self.write_redirect_entry(
+            if let Err(msg) = self.write_redirect_entry(
                 idx,
                 RedirectionEntry::new(
-                    0,
+                    o.bus_irq + MIN_INTERRUPT as u8,
                     DeliveryMode::Fixed,
                     DestinationMode::Physical,
-                    PinPolarity::ActiveHigh, // TODO: parse fom iso
-                    TriggerMode::Edge,       // TODO: parse from iso
+                    o.pin_polarity(),
+                    o.trigger_mode(),
                     true,
                     self.apic_id,
                 ),
-            );
+            ) {
+                error!("I/O APIC: {}", msg);
+            }
         }
     }
 
-    pub fn write_redirect_entry(&mut self, idx: u8, entry: RedirectionEntry) {}
-    pub fn read_redirect_entry(&mut self, idx: u8) {}
+    const fn get_entry_reg(&self, idx: u8) -> u8 {
+        0x10 + 2 * idx
+    }
+
+    pub fn write_redirect_entry(&self, idx: u8, entry: RedirectionEntry) -> Result<(), String> {
+        if idx >= self.redirection_cnt {
+            return Err(format!(
+                "Tried writing I/O APIC redirection entry @ idx {} despite only having {} capacity",
+                idx, self.redirection_cnt
+            ));
+        }
+
+        let ptr = self.get_entry_reg(idx);
+        unsafe {
+            Self::write(&self.region, ptr, entry.low());
+            Self::write(&self.region, ptr + 1, entry.high());
+        };
+
+        Ok(())
+    }
+
+    pub fn read_redirect_entry(&self, idx: u8) -> Result<RedirectionEntry, String> {
+        if idx >= self.redirection_cnt {
+            return Err(format!(
+                "Tried writing I/O APIC redirection entry @ idx {} despite only having {} capacity",
+                idx, self.redirection_cnt
+            ));
+        }
+
+        let ptr = self.get_entry_reg(idx);
+        let (low, high) = unsafe {
+            (
+                Self::read(&self.region, ptr),
+                Self::read(&self.region, ptr + 1),
+            )
+        };
+
+        let raw = ((high as u64) << 32) | (low as u64);
+        Ok(RedirectionEntry(raw))
+    }
 
     pub unsafe fn read(region: &MappedRegion, reg: u8) -> u32 {
         let ptr = region.as_mut_ptr::<u32>();
@@ -212,6 +264,24 @@ pub struct IntSourceOverride {
     pub bus_irq: u8,
     pub gsi: u32,
     pub flags: u16,
+}
+
+impl IntSourceOverride {
+    pub fn pin_polarity(&self) -> PinPolarity {
+        match self.flags & 0b11 {
+            0b01 => PinPolarity::ActiveHigh,
+            0b11 => PinPolarity::ActiveLow,
+            _ => PinPolarity::ActiveHigh,
+        }
+    }
+
+    pub fn trigger_mode(&self) -> TriggerMode {
+        match (self.flags >> 2) & 0b11 {
+            0b01 => TriggerMode::Edge,
+            0b11 => TriggerMode::Level,
+            _ => TriggerMode::Edge,
+        }
+    }
 }
 
 pub struct CpuInfo {
