@@ -23,6 +23,40 @@ impl ApicInfo {
             cpus: Vec::new(),
         }
     }
+
+    pub fn unmask_irq(&mut self, irq: u8) -> Result<(), String> {
+        let iso = self.iso.iter().find(|o| o.bus == 0 && o.bus_irq == irq);
+
+        let gsi = iso.map_or(irq as u32, |iso| iso.gsi);
+        let polarity = iso.map_or(PinPolarity::ActiveHigh, |iso| iso.pin_polarity());
+        let trigger_mode = iso.map_or(TriggerMode::Edge, |iso| iso.trigger_mode());
+
+        let ioapic = self
+            .ioapics
+            .iter_mut()
+            .find(|io| gsi >= io.gsi_base && gsi < io.gsi_base + io.redirection_cnt as u32)
+            .ok_or_else(|| format!("No I/O APIC found for IRQ {} (GSI: {})", irq, gsi))?;
+
+        let idx = (gsi - ioapic.gsi_base) as u8;
+
+        let mut entry = ioapic.read_redirect_entry(idx)?;
+        if !entry.exists() {
+            entry = RedirectionEntry::new(
+                irq + MIN_INTERRUPT as u8,
+                DeliveryMode::Fixed,
+                DestinationMode::Physical,
+                polarity,
+                trigger_mode,
+                false,
+                ioapic.apic_id,
+            );
+
+            return ioapic.write_redirect_entry(idx, entry);
+        }
+
+        entry.unmask();
+        ioapic.write_redirect_entry(idx, entry)
+    }
 }
 
 pub struct Lapic {
@@ -126,6 +160,14 @@ impl RedirectionEntry {
         raw |= (dest_field as u64) << 56;
 
         Self(raw as u64)
+    }
+
+    pub fn unmask(&mut self) {
+        self.0 = self.0 & !(1 << 16);
+    }
+
+    pub fn exists(&self) -> bool {
+        self.0 != 0
     }
 
     pub fn low(&self) -> u32 {

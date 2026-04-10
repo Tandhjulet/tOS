@@ -15,6 +15,7 @@ pc-keyboard = "0.7.0"
 num_enum = { version = "0.7.6", default-features = false }
 bitflags = { version = "2.11.0", default-features = false }
 log = "0.4.17"
+seq-macro = "0.3.6"
 
 [dependencies.crossbeam-queue]
 version = "0.3.11"

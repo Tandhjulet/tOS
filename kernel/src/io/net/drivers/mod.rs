@@ -1,10 +1,10 @@
 use alloc::vec::Vec;
-use x86_64::{instructions::interrupts::without_interrupts, structures::idt::InterruptStackFrame};
+use x86_64::instructions::interrupts::without_interrupts;
 
 use crate::{
     interrupts::MIN_INTERRUPT,
     io::net::{MacAddr, NETWORK_DRIVER, RX_WAKER},
-    sys::interrupts::INTERRUPT_CONTROLLER,
+    sys::interrupts::{INTERRUPT_CONTROLLER, IrqResult},
 };
 
 pub mod e1000;
@@ -15,17 +15,17 @@ pub trait NetworkDriver: Send {
     fn is_up(&mut self) -> bool;
     fn prepare_transmit(&mut self, data: &[u8]);
     fn transmit(&mut self);
-    fn handle_interrupt(&mut self, stack_frame: InterruptStackFrame);
+    fn handle_interrupt(&mut self);
     fn get_interrupt_line(&self) -> u8;
 }
 
 impl dyn NetworkDriver {
-    extern "x86-interrupt" fn fire(stack_frame: InterruptStackFrame) {
+    fn fire() -> IrqResult {
         let irq_line = {
             let mut driver = NETWORK_DRIVER.lock();
             let driver = driver.as_mut().unwrap();
 
-            driver.handle_interrupt(stack_frame);
+            driver.handle_interrupt();
             driver.get_interrupt_line()
         };
 
@@ -33,6 +33,7 @@ impl dyn NetworkDriver {
         INTERRUPT_CONTROLLER.eoi(remapped_line);
 
         RX_WAKER.wake();
+        IrqResult::EoiSent
     }
 
     pub fn send_packet(data: Vec<u8>) {

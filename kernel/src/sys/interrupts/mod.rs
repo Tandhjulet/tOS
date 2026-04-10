@@ -1,5 +1,5 @@
 use crate::{
-    hlt_loop, println,
+    helpers, hlt_loop, println,
     sys::{
         acpi::{
             ACPI,
@@ -9,10 +9,15 @@ use crate::{
         interrupts::apic::{ApicInfo, CpuInfo, IntSourceOverride, IoApicInfo, LapicNmi},
     },
 };
-use alloc::vec::Vec;
+use alloc::{string::String, vec::Vec};
+use lazy_static::lazy_static;
 use pic8259::ChainedPics;
-use spin::{Mutex, MutexGuard};
-use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
+use seq_macro::seq;
+use spin::{Mutex, RwLock};
+use x86_64::{
+    instructions::interrupts::without_interrupts,
+    structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode},
+};
 
 pub mod apic;
 
@@ -22,94 +27,95 @@ pub const PIC_2_OFFSET: u8 = PIC_1_OFFSET + 8;
 
 pub static INTERRUPT_CONTROLLER: InterruptController =
     InterruptController::new(InterruptType::Pic(unsafe {
-        ChainedPics::new(PIC_1_OFFSET, PIC_2_OFFSET)
+        Mutex::new(ChainedPics::new(PIC_1_OFFSET, PIC_2_OFFSET))
     }));
 
-pub struct InterruptController {
-    controller: Mutex<InterruptType>,
-}
+pub struct InterruptController(RwLock<InterruptType>);
 
 impl InterruptController {
     pub const fn new(int_type: InterruptType) -> Self {
-        Self {
-            controller: Mutex::new(int_type),
-        }
+        Self(RwLock::new(int_type))
+    }
+
+    pub fn get(&self) -> spin::RwLockReadGuard<'_, InterruptType> {
+        self.0.read()
     }
 
     pub fn init(&self) {
-        let mut lock = self.lock();
-        lock.init();
-    }
-
-    pub fn lock(&self) -> MutexGuard<'_, InterruptType> {
-        self.controller.lock()
+        self.get().init();
     }
 
     pub fn eoi(&self, id: u8) {
-        self.lock().eoi(id);
+        println!("eoi sending...");
+        self.get().eoi(id);
+        println!("eoi sent!");
     }
 
     pub fn switch_controller(&self, new_int_type: InterruptType) {
-        let mut curr_ctlr = self.lock();
-        curr_ctlr.disable();
-        *curr_ctlr = new_int_type;
+        self.get().disable();
+        *self.0.write() = new_int_type;
     }
 
-    pub fn unmask_irq(&self, irq: u8) {
-        self.lock().unmask_irq(irq);
+    pub fn unmask_irq(&self, irq: u8) -> Result<(), String> {
+        without_interrupts(|| self.get().unmask_irq(irq))
     }
 }
 
 pub enum InterruptType {
-    Apic(ApicInfo),
-    Pic(ChainedPics),
+    Apic(Mutex<ApicInfo>),
+    Pic(Mutex<ChainedPics>),
 }
 
 impl InterruptType {
-    pub fn unmask_irq(&mut self, irq: u8) {
+    pub fn unmask_irq(&self, irq: u8) -> Result<(), String> {
         match self {
-            InterruptType::Apic(_) => todo!(),
+            InterruptType::Apic(apic) => apic.lock().unmask_irq(irq),
             InterruptType::Pic(pics) => unsafe {
+                let mut pics = pics.lock();
                 let [master, slave] = pics.read_masks();
                 if irq < 8 {
                     pics.write_masks(master & !(1u8 << irq), slave);
                 } else {
                     pics.write_masks(master, slave & !(1u8 << (irq - 8)));
                 }
+
+                Ok(())
             },
         }
     }
 
-    pub fn disable(&mut self) {
+    pub fn disable(&self) {
         match self {
             InterruptType::Apic(_) => todo!(),
             InterruptType::Pic(chained_pics) => {
-                unsafe { (*chained_pics).disable() };
+                unsafe { chained_pics.lock().disable() };
             }
         }
     }
 
-    pub fn eoi(&mut self, id: u8) {
+    pub fn eoi(&self, id: u8) {
         match self {
             InterruptType::Apic(_) => todo!(),
-            InterruptType::Pic(chained_pics) => unsafe { chained_pics.notify_end_of_interrupt(id) },
+            InterruptType::Pic(pics) => unsafe {
+                pics.lock().notify_end_of_interrupt(id);
+            },
         }
     }
 
-    pub fn init(&mut self) {
+    pub fn init(&self) {
         match self {
             InterruptType::Apic(info) => {
-                unsafe { info.lapic.enable() };
+                unsafe { info.lock().lapic.enable() };
 
-                for ioapic in &mut info.ioapics {
-                    unsafe { ioapic.init(&info.iso) };
+                for ioapic in &mut info.lock().ioapics {
+                    unsafe { ioapic.init(&info.lock().iso) };
                 }
             }
             InterruptType::Pic(pics) => unsafe {
-                pics.initialize();
+                pics.lock().initialize();
 
-                let [master, slave] = pics.read_masks();
-                pics.write_masks(master & !0x4, slave);
+                let [master, slave] = pics.lock().read_masks();
+                pics.lock().write_masks(master & !0x4, slave);
             },
         }
     }
@@ -132,14 +138,30 @@ impl InterruptIndex {
     }
 }
 
-// FIXME: dont use a Mutex here... instead, use something like:
-// static HANDLERS: Mutex<[Option<fn()>; 256]> = Mutex::new([None; 256]);
-// and then generate 256 functions as unique handlers for each IRQ number using a macro
-pub static IDT: Mutex<InterruptDescriptorTable> = Mutex::new(InterruptDescriptorTable::new());
+seq!(N in 32..=255 {
+    extern "x86-interrupt" fn irq_handler_~N(_: InterruptStackFrame) {
+        if let Some(f) = HANDLERS.lock()[N - 32] {
+            match f() {
+                IrqResult::NoEoi => INTERRUPT_CONTROLLER.eoi(N as u8),
+                IrqResult::EoiSent => {},
+            }
+        }
+        else {
+            INTERRUPT_CONTROLLER.eoi(N as u8);
+        }
+    }
+});
 
-pub fn init_idt() {
-    {
-        let mut idt = IDT.lock();
+pub enum IrqResult {
+    EoiSent,
+    NoEoi,
+}
+
+pub static HANDLERS: Mutex<[Option<fn() -> IrqResult>; 256 - 32]> = Mutex::new([None; 256 - 32]);
+
+lazy_static! {
+    static ref IDT: InterruptDescriptorTable = {
+        let mut idt = InterruptDescriptorTable::new();
         idt.breakpoint.set_handler_fn(breakpoint_handler);
         unsafe {
             idt.double_fault
@@ -148,24 +170,33 @@ pub fn init_idt() {
         }
         idt.page_fault.set_handler_fn(page_fault_handler);
 
-        // FIXME: don't hardcode... create a registrar
-        idt[InterruptIndex::Timer.as_usize()].set_handler_fn(timer_interrupt_handler);
-        idt[InterruptIndex::Keyboard.as_usize()].set_handler_fn(keyboard_interrupt_handler);
-    }
+        seq!(N in 32..=255 {
+            idt[N].set_handler_fn(irq_handler_~N);
+        });
 
-    load_idt();
+        idt
+    };
 }
 
 pub fn load_idt() {
-    let idt = IDT.lock();
-    let idt_static: &'static InterruptDescriptorTable = unsafe { &*(&*idt as *const _) };
-    idt_static.load();
+    IDT.load();
+}
+
+pub fn init() {
+    register_handler(InterruptIndex::Timer.as_u8(), timer_interrupt_handler);
+    register_handler(InterruptIndex::Keyboard.as_u8(), keyboard_interrupt_handler);
+
+    load_idt();
+    INTERRUPT_CONTROLLER.init();
+}
+
+pub fn register_handler(vector: u8, handler: fn() -> IrqResult) {
+    HANDLERS.lock()[vector as usize - 32] = Some(handler);
 }
 
 pub fn try_init_apic() -> Result<(), &'static str> {
     {
-        let curr_int_ctrlr = INTERRUPT_CONTROLLER.lock();
-        if matches!(*curr_int_ctrlr, InterruptType::Apic(..)) {
+        if matches!(*INTERRUPT_CONTROLLER.get(), InterruptType::Apic(..)) {
             return Err("APIC already initialized");
         }
     }
@@ -237,7 +268,7 @@ pub fn try_init_apic() -> Result<(), &'static str> {
         }
     }
 
-    INTERRUPT_CONTROLLER.switch_controller(InterruptType::Apic(apic_info));
+    INTERRUPT_CONTROLLER.switch_controller(InterruptType::Apic(Mutex::new(apic_info)));
     INTERRUPT_CONTROLLER.init();
     Ok(())
 }
@@ -255,18 +286,19 @@ extern "x86-interrupt" fn page_fault_handler(
     hlt_loop();
 }
 
-extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
-    INTERRUPT_CONTROLLER.eoi(InterruptIndex::Timer.as_u8());
+fn timer_interrupt_handler() -> IrqResult {
+    println!("timer!");
+    IrqResult::NoEoi
 }
 
-extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {
+fn keyboard_interrupt_handler() -> IrqResult {
     use x86_64::instructions::port::Port;
 
     let mut port = Port::new(0x60);
     let scancode: u8 = unsafe { port.read() };
     crate::sys::task::keyboard::add_scancode(scancode);
 
-    INTERRUPT_CONTROLLER.eoi(InterruptIndex::Timer.as_u8());
+    IrqResult::NoEoi
 }
 
 extern "x86-interrupt" fn breakpoint_handler(stack_frame: InterruptStackFrame) {

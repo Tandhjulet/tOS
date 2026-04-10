@@ -17,19 +17,10 @@ use bootloader_api::info::FrameBufferInfo;
 
 use crate::{
     io::logger::LockedLogger,
-    sys::interrupts::{self, INTERRUPT_CONTROLLER},
+    sys::interrupts::{self},
 };
 
 extern crate alloc;
-
-pub fn init() {
-    sys::gdt::init();
-
-    interrupts::init_idt();
-    INTERRUPT_CONTROLLER.init();
-
-    x86_64::instructions::interrupts::enable();
-}
 
 pub fn init_logger(buf: &'static mut [u8], info: FrameBufferInfo) {
     let logger = io::logger::LOGGER.get_or_init(move || LockedLogger::new(buf, info));

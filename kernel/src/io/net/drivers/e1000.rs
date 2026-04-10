@@ -1,8 +1,9 @@
 use core::ptr::read_volatile;
 
 use alloc::sync::Arc;
+use log::error;
 use spin::Mutex;
-use x86_64::{instructions::interrupts::without_interrupts, structures::idt::InterruptStackFrame};
+use x86_64::instructions::interrupts::without_interrupts;
 
 /**
  * See https://www.intel.com/content/dam/doc/manual/pci-pci-x-family-gbe-controllers-software-dev-manual.pdf#page389
@@ -11,13 +12,13 @@ use x86_64::{instructions::interrupts::without_interrupts, structures::idt::Inte
 	*/
 use crate::{
     allocator::mmio::{MappedRegion, alloc_dma_region},
-    interrupts::{IDT, MIN_INTERRUPT},
+    interrupts::MIN_INTERRUPT,
     io::{
         net::{MacAddr, RX_QUEUE, drivers::NetworkDriver},
         pci::{PciDevice, bar::BarKind},
     },
     println,
-    sys::interrupts::INTERRUPT_CONTROLLER,
+    sys::interrupts::{self, INTERRUPT_CONTROLLER},
 };
 
 #[allow(unused)]
@@ -500,10 +501,17 @@ impl NetworkDriver for E1000 {
         self.tx_init();
 
         without_interrupts(|| {
-            IDT.lock()[(self.interrupt_line as usize) + MIN_INTERRUPT]
-                .set_handler_fn(<dyn NetworkDriver>::fire);
+            interrupts::register_handler(
+                self.interrupt_line + MIN_INTERRUPT as u8,
+                <dyn NetworkDriver>::fire,
+            );
 
-            INTERRUPT_CONTROLLER.unmask_irq(self.interrupt_line);
+            if let Err(msg) = INTERRUPT_CONTROLLER.unmask_irq(self.interrupt_line) {
+                error!(
+                    "E1000: Failed to unmask IRQ line {} ({})!",
+                    self.interrupt_line, msg
+                );
+            }
         });
 
         self.enable_interrupts();
@@ -554,7 +562,7 @@ impl NetworkDriver for E1000 {
         status & 0x2 != 0
     }
 
-    fn handle_interrupt(&mut self, _: InterruptStackFrame) {
+    fn handle_interrupt(&mut self) {
         let status = unsafe { self.read(cfg::int::CAUSE_READ) };
         if status & cfg::int::ICR_RXT0 > 0 {
             self.handle_receive();

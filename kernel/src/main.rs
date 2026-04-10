@@ -8,13 +8,14 @@ use bootloader_api::{BootInfo, BootloaderConfig, config::Mapping, entry_point};
 use kernel::{
     allocator, init_logger,
     io::net::{network_rx_task, network_tx_task},
+    println,
     sys::{
-        acpi::Acpi,
-        interrupts,
+        self,
+        interrupts::{self},
         task::{Task, executor::Executor, keyboard},
     },
 };
-use log::{error, info};
+use log::info;
 
 extern crate alloc;
 
@@ -29,16 +30,24 @@ entry_point!(kernel_main, config = &BOOTLOADER_CONFIG);
 fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     init_framebuffer(boot_info);
 
-    kernel::init();
+    sys::gdt::init();
+
+    interrupts::load_idt();
+
     allocator::init(boot_info).expect("heap initialization failed");
 
-    if let Err(msg) = Acpi::try_init(boot_info.rsdp_addr) {
-        error!("ACPI: {}", msg);
-    }
+    println!("enabling interrupts!");
+    x86_64::instructions::interrupts::enable();
+    println!("enabled!");
 
-    if let Err(msg) = interrupts::try_init_apic() {
-        error!("APIC: {}", msg);
-    }
+    // if let Err(msg) = Acpi::try_init(boot_info.rsdp_addr) {
+    //     error!("ACPI: {}", msg);
+    // }
+
+    // if let Err(msg) = interrupts::try_init_apic() {
+    //     error!("APIC: {}", msg);
+    // }
+
     info!("info!");
 
     // pci::init();
