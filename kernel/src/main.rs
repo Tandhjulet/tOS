@@ -42,6 +42,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     if let Err(msg) = interrupts::try_init_apic() {
         error!("APIC: {}", msg);
     }
+    info!("info!");
 
     // pci::init();
 

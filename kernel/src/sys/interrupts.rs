@@ -1,4 +1,5 @@
 use crate::{
+    allocator::mmio::{MappedRegion, map_mmio},
     hlt_loop, println,
     sys::{
         acpi::{
@@ -11,7 +12,10 @@ use crate::{
 use alloc::vec::Vec;
 use pic8259::ChainedPics;
 use spin::{Mutex, MutexGuard};
-use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
+use x86_64::{
+    PhysAddr,
+    structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode},
+};
 
 pub const MIN_INTERRUPT: usize = 32;
 pub const PIC_1_OFFSET: u8 = MIN_INTERRUPT as u8;
@@ -95,28 +99,34 @@ impl InterruptType {
 
     pub fn init(&mut self) {
         match self {
-            InterruptType::Apic(_) => todo!(),
+            InterruptType::Apic(info) => {
+                unsafe { info.lapic.enable() };
+
+                for ioapic in &mut info.ioapics {
+                    unsafe { ioapic.init(&info.iso) };
+                }
+            }
             InterruptType::Pic(pics) => unsafe {
                 pics.initialize();
 
                 let [master, slave] = pics.read_masks();
-                pics.write_masks(master & !(1u8 << 2), slave);
+                pics.write_masks(master & !0x4, slave);
             },
         }
     }
 }
 
 pub struct ApicInfo {
-    pub lapic_addr: u32,
+    pub lapic: Lapic,
     pub ioapics: Vec<IoApicInfo>,
     pub iso: Vec<IntSourceOverride>,
     pub cpus: Vec<CpuInfo>,
 }
 
 impl ApicInfo {
-    pub fn new(lapic_addr: u32) -> Self {
+    pub fn new(lapic_addr: u64) -> Self {
         Self {
-            lapic_addr,
+            lapic: Lapic::new_mapped(lapic_addr),
             ioapics: Vec::new(),
             iso: Vec::new(),
             cpus: Vec::new(),
@@ -124,11 +134,94 @@ impl ApicInfo {
     }
 }
 
+pub struct Lapic {
+    region: MappedRegion,
+}
+
+impl Lapic {
+    const SVR_OFFSET: usize = 0xF0;
+    const TPR_OFFSET: usize = 0x80;
+
+    pub fn new_mapped(lapic_addr: u64) -> Self {
+        let region = map_mmio(PhysAddr::new(lapic_addr), 0x1000);
+        Self { region }
+    }
+
+    pub unsafe fn new(region: MappedRegion) -> Self {
+        Self { region }
+    }
+
+    pub unsafe fn enable(&self) {
+        let svr = unsafe { self.read(Self::SVR_OFFSET) };
+
+        // Bit 8 = APIC Software Enable, 0-7 = spurious vector
+        unsafe { self.write(Self::SVR_OFFSET, svr | (1 << 8) | 0xFF) };
+
+        unsafe { self.write(Self::TPR_OFFSET, 0) };
+    }
+
+    pub unsafe fn read(&self, offset: usize) -> u32 {
+        let ptr = self.region.as_ptr::<u32>();
+        unsafe { ptr.byte_add(offset).read_volatile() }
+    }
+
+    pub unsafe fn write(&self, offset: usize, value: u32) {
+        let ptr = self.region.as_mut_ptr::<u32>();
+        unsafe { ptr.byte_add(offset).write_volatile(value) }
+    }
+}
+
 pub struct IoApicInfo {
     pub id: u8,
-    pub addr: u32,
+    pub region: MappedRegion,
     pub gsi_base: u32,
+    pub ver: u8,
+    pub redirection_cnt: u8,
     pub nmis: Vec<IoApicNmi>,
+}
+
+impl IoApicInfo {
+    const IOREGSEL: usize = 0x00;
+    const IOREGWIN: usize = 0x10;
+
+    const IO_APIC_ID: u8 = 0x00;
+    const IO_APIC_VER: u8 = 0x01;
+    const IO_APIC_ARB: u8 = 0x02;
+
+    pub fn new(id: u8, addr: u64, gsi_base: u32) -> Self {
+        let region = map_mmio(PhysAddr::new(addr), 0x1000);
+
+        let entry_cnt = unsafe { Self::read(&region, Self::IO_APIC_VER) };
+        let ver = entry_cnt as u8;
+        let redirection_cnt = (entry_cnt >> 16) as u8 + 1;
+
+        Self {
+            id,
+            region,
+            gsi_base,
+            redirection_cnt,
+            ver,
+            nmis: Vec::new(),
+        }
+    }
+
+    pub unsafe fn init(&mut self, iso: &[IntSourceOverride]) {}
+
+    pub fn write_redirect_entry(&mut self) {}
+    pub fn read_redirect_entry(&mut self) {}
+
+    pub unsafe fn read(region: &MappedRegion, reg: u8) -> u32 {
+        let ptr = region.as_mut_ptr::<u32>();
+        unsafe { ptr.byte_add(Self::IOREGSEL).write_volatile(reg as u32) };
+
+        unsafe { ptr.byte_add(Self::IOREGWIN).read_volatile() }
+    }
+
+    pub unsafe fn write(region: &MappedRegion, reg: u8, value: u32) {
+        let ptr = region.as_mut_ptr::<u32>();
+        unsafe { ptr.byte_add(Self::IOREGSEL).write_volatile(reg as u32) };
+        unsafe { ptr.byte_add(Self::IOREGWIN).write_volatile(value as u32) };
+    }
 }
 
 pub struct IntSourceOverride {
@@ -222,7 +315,7 @@ pub fn try_init_apic() -> Result<(), &'static str> {
 
     let madt = madt_table.get();
 
-    let mut apic_info = ApicInfo::new(madt.lapic_addr);
+    let mut apic_info = ApicInfo::new(madt.lapic_addr as u64);
 
     let entries = madt.entries();
     for entry in entries {
@@ -236,12 +329,11 @@ pub fn try_init_apic() -> Result<(), &'static str> {
                 });
             }
             MadtEntry::IoApic(io) => {
-                apic_info.ioapics.push(IoApicInfo {
-                    id: io.io_apic_id,
-                    addr: io.io_apic_addr,
-                    gsi_base: io.gsi_base,
-                    nmis: Vec::new(),
-                });
+                apic_info.ioapics.push(IoApicInfo::new(
+                    io.io_apic_id,
+                    io.io_apic_addr as u64,
+                    io.gsi_base,
+                ));
             }
             MadtEntry::InterruptSourceOverride(iso) => {
                 apic_info.iso.push(IntSourceOverride {
@@ -283,6 +375,7 @@ pub fn try_init_apic() -> Result<(), &'static str> {
     }
 
     INTERRUPT_CONTROLLER.switch_controller(InterruptType::Apic(apic_info));
+    INTERRUPT_CONTROLLER.init();
     Ok(())
 }
 
