@@ -4,15 +4,12 @@
 #![test_runner(kernel::test_runner)]
 #![reexport_test_harness_main = "test_main"]
 
-use bootloader_api::{BootInfo, BootloaderConfig, config::Mapping, entry_point, info::Optional};
+use bootloader_api::{BootInfo, BootloaderConfig, config::Mapping, entry_point};
 use kernel::{
     allocator, init_logger,
-    io::{
-        net::{network_rx_task, network_tx_task},
-        pci,
-    },
+    io::net::{network_rx_task, network_tx_task},
     sys::{
-        acpi::{ACPI, Acpi},
+        acpi::Acpi,
         interrupts,
         task::{Task, executor::Executor, keyboard},
     },

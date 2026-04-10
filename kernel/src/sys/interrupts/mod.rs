@@ -1,5 +1,4 @@
 use crate::{
-    allocator::mmio::{MappedRegion, map_mmio},
     hlt_loop, println,
     sys::{
         acpi::{
@@ -13,10 +12,7 @@ use crate::{
 use alloc::vec::Vec;
 use pic8259::ChainedPics;
 use spin::{Mutex, MutexGuard};
-use x86_64::{
-    PhysAddr,
-    structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode},
-};
+use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
 
 pub mod apic;
 
