@@ -38,6 +38,10 @@ fn main() {
         .arg("filter-dump,id=f1,netdev=net0,file=/tmp/dhcp.pcap");
     cmd.arg("-device").arg("e1000,netdev=net0");
 
+    // interrupts
+    cmd.arg("-d").arg("int");
+    cmd.arg("-D").arg("/tmp/qemu_int.log");
+
     // drives
     cmd.arg("-drive")
         .arg("file=../nvm.img,if=none,id=nvm,format=raw");
@@ -46,7 +50,7 @@ fn main() {
     // don't store
     cmd.arg("-snapshot");
 
-    cmd.arg("-monitor").arg("stdio");
+    cmd.arg("-serial").arg("stdio");
 
     if uefi {
         let prebuilt =

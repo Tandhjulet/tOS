@@ -1,5 +1,5 @@
 use crate::{
-    hlt_loop, println,
+    hlt_loop, println, serial_println,
     sys::{
         acpi::{
             ACPI,
@@ -13,7 +13,7 @@ use alloc::{string::String, vec::Vec};
 use lazy_static::lazy_static;
 use pic8259::ChainedPics;
 use seq_macro::seq;
-use spin::{Mutex, RwLock};
+use spin::Mutex;
 use x86_64::{
     instructions::interrupts::without_interrupts,
     structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode},
@@ -27,18 +27,18 @@ pub const PIC_2_OFFSET: u8 = PIC_1_OFFSET + 8;
 
 pub static INTERRUPT_CONTROLLER: InterruptController =
     InterruptController::new(InterruptType::Pic(unsafe {
-        Mutex::new(ChainedPics::new(PIC_1_OFFSET, PIC_2_OFFSET))
+        ChainedPics::new(PIC_1_OFFSET, PIC_2_OFFSET)
     }));
 
-pub struct InterruptController(RwLock<InterruptType>);
+pub struct InterruptController(Mutex<InterruptType>);
 
 impl InterruptController {
     pub const fn new(int_type: InterruptType) -> Self {
-        Self(RwLock::new(int_type))
+        Self(Mutex::new(int_type))
     }
 
-    pub fn get(&self) -> spin::RwLockReadGuard<'_, InterruptType> {
-        self.0.read()
+    pub fn get(&self) -> spin::MutexGuard<'_, InterruptType> {
+        self.0.lock()
     }
 
     pub fn init(&self) {
@@ -50,26 +50,26 @@ impl InterruptController {
     }
 
     pub fn switch_controller(&self, new_int_type: InterruptType) {
-        self.get().disable();
-        *self.0.write() = new_int_type;
+        let mut guard = self.get();
+        guard.disable();
+        *guard = new_int_type;
     }
 
-    pub fn unmask_irq(&self, irq: u8) -> Result<(), String> {
-        without_interrupts(|| self.get().unmask_irq(irq))
+    pub unsafe fn unmask_irq(&self, irq: u8) -> Result<(), String> {
+        unsafe { self.get().unmask_irq(irq) }
     }
 }
 
 pub enum InterruptType {
-    Apic(Mutex<ApicInfo>),
-    Pic(Mutex<ChainedPics>),
+    Apic(ApicInfo),
+    Pic(ChainedPics),
 }
 
 impl InterruptType {
-    pub fn unmask_irq(&self, irq: u8) -> Result<(), String> {
+    pub unsafe fn unmask_irq(&mut self, irq: u8) -> Result<(), String> {
         match self {
-            InterruptType::Apic(apic) => apic.lock().unmask_irq(irq),
+            InterruptType::Apic(apic) => apic.unmask_irq(irq),
             InterruptType::Pic(pics) => unsafe {
-                let mut pics = pics.lock();
                 let [master, slave] = pics.read_masks();
                 if irq < 8 {
                     pics.write_masks(master & !(1u8 << irq), slave);
@@ -82,28 +82,27 @@ impl InterruptType {
         }
     }
 
-    pub fn disable(&self) {
+    pub fn disable(&mut self) {
         match self {
             InterruptType::Apic(_) => todo!(),
             InterruptType::Pic(chained_pics) => {
-                unsafe { chained_pics.lock().disable() };
+                unsafe { chained_pics.disable() };
             }
         }
     }
 
-    pub fn eoi(&self, id: u8) {
+    pub fn eoi(&mut self, id: u8) {
         match self {
             InterruptType::Apic(_) => todo!(),
             InterruptType::Pic(pics) => unsafe {
-                pics.lock().notify_end_of_interrupt(id);
+                pics.notify_end_of_interrupt(id);
             },
         }
     }
 
-    pub fn init(&self) {
+    pub fn init(&mut self) {
         match self {
             InterruptType::Apic(info) => {
-                let mut info = info.lock();
                 unsafe { info.lapic.enable() };
 
                 let iso = info.iso.clone();
@@ -112,10 +111,10 @@ impl InterruptType {
                 }
             }
             InterruptType::Pic(pics) => unsafe {
-                pics.lock().initialize();
+                pics.initialize();
 
-                let [master, slave] = pics.lock().read_masks();
-                pics.lock().write_masks(master & !0x4, slave);
+                let [master, slave] = pics.read_masks();
+                pics.write_masks(master & !(1 << 2), slave);
             },
         }
     }
@@ -129,15 +128,18 @@ pub enum InterruptIndex {
 }
 
 seq!(N in 32..=255 {
-    extern "x86-interrupt" fn irq_handler_~N(_: InterruptStackFrame) {
-        if let Some(f) = HANDLERS.lock()[N - 32] {
-            match f() {
+    extern "x86-interrupt" fn irq_handler_~N(_stack_frame: InterruptStackFrame) {
+        let handler = {
+            let handlers = HANDLERS.lock();
+            handlers[N - 32]
+        };
+
+        match handler {
+            Some(f) => match f() {
                 IrqResult::EoiNeeded => INTERRUPT_CONTROLLER.eoi(N as u8),
                 IrqResult::EoiSent => {},
-            }
-        }
-        else {
-            INTERRUPT_CONTROLLER.eoi(N as u8);
+            },
+            None => INTERRUPT_CONTROLLER.eoi(N as u8),
         }
     }
 });
@@ -177,10 +179,10 @@ pub fn init() -> Result<(), String> {
     INTERRUPT_CONTROLLER.init();
 
     register_handler(InterruptIndex::Timer as u8, timer_interrupt_handler);
-    // register_handler(InterruptIndex::Keyboard as u8, keyboard_interrupt_handler);
+    register_handler(InterruptIndex::Keyboard as u8, keyboard_interrupt_handler);
 
     enable_irq(InterruptIndex::Timer as u8)?;
-    // enable_irq(InterruptIndex::Keyboard as u8)?;
+    enable_irq(InterruptIndex::Keyboard as u8)?;
 
     Ok(())
 }
@@ -190,7 +192,7 @@ pub fn register_handler(vector: u8, handler: fn() -> IrqResult) {
 }
 
 pub fn enable_irq(vector: u8) -> Result<(), String> {
-    without_interrupts(|| INTERRUPT_CONTROLLER.unmask_irq(vector - MIN_INTERRUPT as u8))
+    without_interrupts(|| unsafe { INTERRUPT_CONTROLLER.unmask_irq(vector - MIN_INTERRUPT as u8) })
 }
 
 pub fn try_init_apic() -> Result<(), &'static str> {
@@ -267,7 +269,7 @@ pub fn try_init_apic() -> Result<(), &'static str> {
         }
     }
 
-    INTERRUPT_CONTROLLER.switch_controller(InterruptType::Apic(Mutex::new(apic_info)));
+    INTERRUPT_CONTROLLER.switch_controller(InterruptType::Apic(apic_info));
     INTERRUPT_CONTROLLER.init();
     Ok(())
 }
@@ -296,8 +298,6 @@ fn keyboard_interrupt_handler() -> IrqResult {
     let scancode: u8 = unsafe { port.read() };
     crate::sys::task::keyboard::add_scancode(scancode);
 
-    println!("press!");
-
     IrqResult::EoiNeeded
 }
 
@@ -307,9 +307,17 @@ extern "x86-interrupt" fn breakpoint_handler(stack_frame: InterruptStackFrame) {
 
 extern "x86-interrupt" fn double_fault_handler(
     stack_frame: InterruptStackFrame,
-    _error_code: u64,
+    error_code: u64,
 ) -> ! {
-    panic!("EXCEPTION: DOUBLE FAULT\n{:#?}", stack_frame);
+    serial_println!("DOUBLE FAULT");
+    serial_println!("IP: {:#x}", stack_frame.instruction_pointer.as_u64());
+    serial_println!("SP: {:#x}", stack_frame.stack_pointer.as_u64());
+    serial_println!("code seg: {:#x}", stack_frame.code_segment.index());
+
+    panic!(
+        "EXCEPTION: DOUBLE FAULT\n{:#?} (Code: {})",
+        stack_frame, error_code
+    );
 }
 
 #[test_case]

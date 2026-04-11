@@ -506,7 +506,7 @@ impl NetworkDriver for E1000 {
                 <dyn NetworkDriver>::fire,
             );
 
-            if let Err(msg) = INTERRUPT_CONTROLLER.unmask_irq(self.interrupt_line) {
+            if let Err(msg) = unsafe { INTERRUPT_CONTROLLER.unmask_irq(self.interrupt_line) } {
                 error!(
                     "E1000: Failed to unmask IRQ line {} ({})!",
                     self.interrupt_line, msg

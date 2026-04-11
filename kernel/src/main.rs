@@ -8,7 +8,7 @@ use bootloader_api::{BootInfo, BootloaderConfig, config::Mapping, entry_point};
 use kernel::{
     allocator, init_logger,
     io::net::{network_rx_task, network_tx_task},
-    println,
+    println, serial_println,
     sys::{
         self,
         interrupts::{self},
@@ -22,7 +22,6 @@ extern crate alloc;
 pub static BOOTLOADER_CONFIG: BootloaderConfig = {
     let mut config = BootloaderConfig::new_default();
     config.mappings.physical_memory = Some(Mapping::Dynamic);
-    config.kernel_stack_size = 512 * 1024;
     config
 };
 
@@ -40,8 +39,6 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
 
     x86_64::instructions::interrupts::enable();
 
-    println!("A!");
-
     // if let Err(msg) = Acpi::try_init(boot_info.rsdp_addr) {
     //     error!("ACPI: {}", msg);
     // }
@@ -50,25 +47,17 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     //     error!("APIC: {}", msg);
     // }
 
-    info!("info!");
-
     // pci::init();
 
     // networking::init();
     // filesystem::init();
 
-    info!("info 2!");
-
-    // let mut executor = Executor::new();
-    // executor.spawn(Task::new(network_rx_task()));
-    // executor.spawn(Task::new(network_tx_task()));
-    // executor.spawn(Task::new(kernel_main_task()));
-    // executor.spawn(Task::new(keyboard::print_keypresses()));
-    // executor.run();
-
-    loop {
-        info!("info!");
-    }
+    let mut executor = Executor::new();
+    executor.spawn(Task::new(network_rx_task()));
+    executor.spawn(Task::new(network_tx_task()));
+    executor.spawn(Task::new(kernel_main_task()));
+    executor.spawn(Task::new(keyboard::print_keypresses()));
+    executor.run();
 }
 
 async fn kernel_main_task() {
@@ -86,6 +75,7 @@ fn init_framebuffer(boot_info: *mut BootInfo) {
     let buf: &'static mut [u8] = unsafe {
         let fb = (*boot_info).framebuffer.as_mut().unwrap();
         let buf = fb.buffer_mut();
+        serial_println!("FB addr: {:#x} len: {:#x}", buf.as_ptr() as u64, buf.len());
         core::slice::from_raw_parts_mut(buf.as_mut_ptr(), buf.len())
     };
     let info = unsafe { (*boot_info).framebuffer.as_ref().unwrap().info() };
