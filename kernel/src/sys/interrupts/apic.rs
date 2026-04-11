@@ -48,7 +48,7 @@ impl ApicInfo {
                 polarity,
                 trigger_mode,
                 false,
-                ioapic.apic_id,
+                &self.lapic,
             );
 
             return ioapic.write_redirect_entry(idx, entry);
@@ -64,8 +64,10 @@ pub struct Lapic {
 }
 
 impl Lapic {
+    const ID_OFFSET: usize = 0x20;
     const SVR_OFFSET: usize = 0xF0;
     const TPR_OFFSET: usize = 0x80;
+    const EOI_OFFSET: usize = 0xB0;
 
     pub fn new_mapped(lapic_addr: u64) -> Self {
         let region = map_mmio(PhysAddr::new(lapic_addr), 0x1000);
@@ -83,6 +85,14 @@ impl Lapic {
         unsafe { self.write(Self::SVR_OFFSET, svr | (1 << 8) | 0xFF) };
 
         unsafe { self.write(Self::TPR_OFFSET, 0) };
+    }
+
+    pub fn id(&self) -> u32 {
+        unsafe { self.read(Self::ID_OFFSET) }
+    }
+
+    pub fn eoi(&self) {
+        unsafe { self.write(Self::EOI_OFFSET, 0) };
     }
 
     pub unsafe fn read(&self, offset: usize) -> u32 {
@@ -138,7 +148,7 @@ impl RedirectionEntry {
         pin_polary: PinPolarity,
         trigger_mode: TriggerMode,
         masked: bool,
-        dest: u8,
+        dest: &Lapic,
     ) -> Self {
         let mut raw = 0u64;
         raw |= vector as u64;
@@ -152,11 +162,11 @@ impl RedirectionEntry {
             raw |= 1 << 16;
         }
 
-        let dest_field = if dest_mode == DestinationMode::Physical {
-            dest & 0b1111
-        } else {
-            dest
+        let dest_field = match dest_mode {
+            DestinationMode::Physical => dest.id() & 0b1111,
+            DestinationMode::Logical => todo!("logical destination mode not yet implemented"),
         };
+
         raw |= (dest_field as u64) << 56;
 
         Self(raw as u64)
@@ -166,8 +176,12 @@ impl RedirectionEntry {
         self.0 = self.0 & !(1 << 16);
     }
 
+    pub fn vector(&self) -> u8 {
+        self.0 as u8
+    }
+
     pub fn exists(&self) -> bool {
-        self.0 != 0
+        self.vector() != 0
     }
 
     pub fn low(&self) -> u32 {
@@ -216,7 +230,7 @@ impl IoApicInfo {
         }
     }
 
-    pub unsafe fn init(&mut self, iso: &[IntSourceOverride]) {
+    pub unsafe fn init(&mut self, lapic: &Lapic, iso: &[IntSourceOverride]) {
         let (gsi_base, gsi_end) = {
             let base = self.gsi_base;
             (base, base + self.redirection_cnt as u32)
@@ -238,7 +252,7 @@ impl IoApicInfo {
                     o.pin_polarity(),
                     o.trigger_mode(),
                     true,
-                    self.apic_id,
+                    lapic,
                 ),
             ) {
                 error!("I/O APIC: {}", msg);

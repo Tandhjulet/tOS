@@ -53,6 +53,7 @@ impl InterruptController {
         let mut guard = self.get();
         guard.disable();
         *guard = new_int_type;
+        guard.init();
     }
 
     pub unsafe fn unmask_irq(&self, irq: u8) -> Result<(), String> {
@@ -93,7 +94,9 @@ impl InterruptType {
 
     pub fn eoi(&mut self, id: u8) {
         match self {
-            InterruptType::Apic(_) => todo!(),
+            InterruptType::Apic(apic) => {
+                apic.lapic.eoi();
+            }
             InterruptType::Pic(pics) => unsafe {
                 pics.notify_end_of_interrupt(id);
             },
@@ -107,7 +110,7 @@ impl InterruptType {
 
                 let iso = info.iso.clone();
                 for ioapic in &mut info.ioapics {
-                    unsafe { ioapic.init(&iso) };
+                    unsafe { ioapic.init(&info.lapic, &iso) };
                 }
             }
             InterruptType::Pic(pics) => unsafe {
@@ -133,6 +136,8 @@ seq!(N in 32..=255 {
             let handlers = HANDLERS.lock();
             handlers[N - 32]
         };
+
+        println!("received interrupt {}", N);
 
         match handler {
             Some(f) => match f() {
@@ -174,16 +179,17 @@ pub fn load_idt() {
     IDT.load();
 }
 
-pub fn init() -> Result<(), String> {
+pub fn init() {
     load_idt();
     INTERRUPT_CONTROLLER.init();
 
     register_handler(InterruptIndex::Timer as u8, timer_interrupt_handler);
     register_handler(InterruptIndex::Keyboard as u8, keyboard_interrupt_handler);
+}
 
-    enable_irq(InterruptIndex::Timer as u8)?;
-    enable_irq(InterruptIndex::Keyboard as u8)?;
-
+pub fn enable_isa_irq() -> Result<(), String> {
+    enable_interrupt(InterruptIndex::Timer as u8)?;
+    enable_interrupt(InterruptIndex::Keyboard as u8)?;
     Ok(())
 }
 
@@ -191,7 +197,10 @@ pub fn register_handler(vector: u8, handler: fn() -> IrqResult) {
     without_interrupts(|| HANDLERS.lock()[vector as usize - MIN_INTERRUPT] = Some(handler))
 }
 
-pub fn enable_irq(vector: u8) -> Result<(), String> {
+/**
+ * Maps interrupt to IRQ line and enables that line
+ */
+pub fn enable_interrupt(vector: u8) -> Result<(), String> {
     without_interrupts(|| unsafe { INTERRUPT_CONTROLLER.unmask_irq(vector - MIN_INTERRUPT as u8) })
 }
 
@@ -270,7 +279,6 @@ pub fn try_init_apic() -> Result<(), &'static str> {
     }
 
     INTERRUPT_CONTROLLER.switch_controller(InterruptType::Apic(apic_info));
-    INTERRUPT_CONTROLLER.init();
     Ok(())
 }
 

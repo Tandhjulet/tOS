@@ -3,6 +3,7 @@ use core::{
     pin::Pin,
 };
 
+use log::error;
 use num_enum::TryFromPrimitive;
 
 use crate::{
@@ -155,6 +156,7 @@ impl<'a> Iterator for MadtEntryIter<'a> {
             self.remaining_length -= header.length as u32;
 
             let Ok(kind) = MadtEntryKind::try_from(header.entry_type) else {
+                error!("unrecognized MADT header type {}", header.entry_type);
                 continue;
             };
 

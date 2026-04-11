@@ -11,7 +11,8 @@ use kernel::{
     println, serial_println,
     sys::{
         self,
-        interrupts::{self},
+        acpi::Acpi,
+        interrupts::{self, INTERRUPT_CONTROLLER},
         task::{Task, executor::Executor, keyboard},
     },
 };
@@ -33,19 +34,20 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     init_framebuffer(boot_info);
     allocator::init(boot_info).expect("heap initialization failed");
 
-    if let Err(msg) = interrupts::init() {
-        error!("INTERRUPT: {}", msg);
-    }
-
+    interrupts::init();
     x86_64::instructions::interrupts::enable();
 
-    // if let Err(msg) = Acpi::try_init(boot_info.rsdp_addr) {
-    //     error!("ACPI: {}", msg);
-    // }
+    if let Err(msg) = Acpi::try_init(boot_info.rsdp_addr) {
+        error!("ACPI: {}", msg);
+    }
 
-    // if let Err(msg) = interrupts::try_init_apic() {
-    //     error!("APIC: {}", msg);
-    // }
+    if let Err(msg) = interrupts::try_init_apic() {
+        error!("APIC: {}", msg);
+    }
+
+    if let Err(msg) = interrupts::enable_isa_irq() {
+        error!("IRQ: {}", msg);
+    }
 
     // pci::init();
 
