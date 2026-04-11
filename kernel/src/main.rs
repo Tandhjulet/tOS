@@ -6,8 +6,11 @@
 
 use bootloader_api::{BootInfo, BootloaderConfig, config::Mapping, entry_point};
 use kernel::{
-    allocator, init_logger,
-    io::net::{network_rx_task, network_tx_task},
+    allocator, filesystem, init_logger,
+    io::{
+        net::{network_rx_task, network_tx_task},
+        pci,
+    },
     println, serial_println,
     sys::{
         self,
@@ -49,7 +52,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         error!("IRQ: {}", msg);
     }
 
-    // pci::init();
+    pci::init();
 
     // networking::init();
     // filesystem::init();

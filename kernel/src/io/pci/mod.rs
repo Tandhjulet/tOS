@@ -85,6 +85,12 @@ impl HeaderType {
     }
 }
 
+#[repr(u8)]
+pub enum PciCapability {
+    Msi = 0x05,
+    MsiX = 0x11,
+}
+
 impl PciDevice {
     const OFF_ID: u8 = 0x0;
     const OFF_COMMAND_STATUS: u8 = 0x04;
@@ -93,6 +99,7 @@ impl PciDevice {
     const OFF_INTERRUPT: u8 = 0x3C;
     const OFF_BARS_START: u8 = 0x10;
     const OFF_SEC_BUS: u8 = 0x19;
+    const OFF_CAPABILITIES: u8 = 0x34;
 
     pub fn new_pci(id: u32, bus: u8, device: u8, function: u8) -> Result<Self, String> {
         let vendor_id = (id & 0xFFFF) as u16;
@@ -141,6 +148,44 @@ impl PciDevice {
 
     pub fn write(&self, offset: u8, value: u32) {
         IoPci::write(self.bus, self.device, self.function, offset, value);
+    }
+
+    pub fn has_capabilities(&self) -> bool {
+        self.status() & (1 << 4) > 0
+    }
+
+    pub fn find_capability(&self, to_find: PciCapability) -> Option<u8> {
+        if !self.has_capabilities() {
+            return None;
+        }
+
+        let to_find = to_find as u8;
+
+        let capabilities = self.read(Self::OFF_CAPABILITIES) as u8;
+        // mask bottom 2 bits of cap. ptr. to find addr of first cap.
+        let mut cap_addr = capabilities & 0xFC;
+
+        // last cap has ptr set to 0
+        const FINAL_CAP_ADDR: u8 = 0;
+        while cap_addr != FINAL_CAP_ADDR {
+            let cap_id = self.read(cap_addr) as u8;
+            if cap_id == to_find {
+                return Some(cap_addr);
+            }
+
+            let next_cap_ptr = self.read(cap_addr + 1) as u8;
+            cap_addr = next_cap_ptr;
+        }
+
+        None
+    }
+
+    pub fn interrupt_support(&self) -> InterruptSupport {
+        InterruptSupport {
+            isa: true,
+            msi: self.find_capability(PciCapability::Msi).is_some(),
+            msix: self.find_capability(PciCapability::MsiX).is_some(),
+        }
     }
 
     pub fn is_pcie(&self) -> bool {
@@ -249,6 +294,12 @@ impl PciDevice {
             slot += slots_used as usize;
         }
     }
+}
+
+pub struct InterruptSupport {
+    pub isa: bool,
+    pub msi: bool,
+    pub msix: bool,
 }
 
 impl fmt::Display for PciDevice {

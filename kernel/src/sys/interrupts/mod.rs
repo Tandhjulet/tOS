@@ -137,8 +137,6 @@ seq!(N in 32..=255 {
             handlers[N - 32]
         };
 
-        println!("received interrupt {}", N);
-
         match handler {
             Some(f) => match f() {
                 IrqResult::EoiNeeded => INTERRUPT_CONTROLLER.eoi(N as u8),
