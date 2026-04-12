@@ -1,10 +1,15 @@
-use core::fmt;
+use core::{
+    fmt,
+    ops::{Deref, DerefMut},
+    ptr, slice,
+};
 
 use alloc::{borrow::ToOwned, format, string::String, sync::Arc, vec::Vec};
 use lazy_static::lazy_static;
 use log::error;
 use num_enum::TryFromPrimitive;
 use spin::Mutex;
+use volatile::Volatile;
 use x86_64::PhysAddr;
 
 use crate::{
@@ -235,6 +240,29 @@ impl PciDevice {
         Ok(())
     }
 
+    pub fn get_msix_tables(&self) -> Result<MsixVectorTable<'_>, &'static str> {
+        let cap_addr = self
+            .find_capability(PciCapability::MsiX)
+            .ok_or("PCI device does not support MSI-X")?;
+        let msix_reg_index = cap_addr >> 2;
+
+        const VECTOR_TABLE_OFF: u8 = 1;
+        let table = self.read(msix_reg_index + VECTOR_TABLE_OFF);
+        let bir = table & 0x7;
+        let Some(bar) = self.get_bar(bir as usize) else {
+            Err("Failed finding MSI-X bar for PCI device!")?
+        };
+
+        let ctrl = self.read(msix_reg_index) >> 16;
+        let table_size = ctrl & 0x3FF;
+        let table_offset = table >> 3;
+
+        bar.map_mmio();
+
+        let vector_table = MsixVectorTable::new(bar, table_size as usize, table_offset as usize);
+        Ok(vector_table)
+    }
+
     pub fn is_pcie(&self) -> bool {
         self.ext_cfg.is_some() // check capabilities too?
     }
@@ -341,6 +369,47 @@ impl PciDevice {
             slot += slots_used as usize;
         }
     }
+}
+
+pub struct MsixVectorTable<'a> {
+    entries: &'a mut [MsixVectorEntry],
+}
+
+impl<'a> MsixVectorTable<'a> {
+    pub fn new(bar: &'a Bar, table_entries: usize, table_offset: usize) -> Self {
+        bar.map_mmio();
+        let region = bar.region().unwrap();
+        let raw_ptr = unsafe {
+            region
+                .as_mut_ptr::<MsixVectorEntry>()
+                .byte_add(table_offset)
+        };
+
+        let slice = unsafe { slice::from_raw_parts_mut(raw_ptr, table_entries) };
+        Self { entries: slice }
+    }
+}
+
+impl Deref for MsixVectorTable<'_> {
+    type Target = [MsixVectorEntry];
+
+    fn deref(&self) -> &Self::Target {
+        self.entries
+    }
+}
+
+impl DerefMut for MsixVectorTable<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.entries
+    }
+}
+
+#[repr(C)]
+pub struct MsixVectorEntry {
+    msg_low_addr: Volatile<u32>,
+    msg_high_addr: Volatile<u32>,
+    msg_data: Volatile<u32>,
+    vector_ctrl: Volatile<u32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
