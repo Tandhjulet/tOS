@@ -213,16 +213,24 @@ impl PciDevice {
         self.write(msi_reg_index + msg_data_offset, int_num as u32);
 
         // Enable MSI (bit 16 of header)
-        const MSI_ENABLE: u32 = 1;
-        header |= MSI_ENABLE << 16;
+        const MSI_ENABLE: u32 = 1 << 16;
+        header |= MSI_ENABLE;
         self.write(msi_reg_index, header);
 
         Ok(())
     }
 
     pub fn enable_msix(&self) -> Result<(), &'static str> {
-        self.find_capability(PciCapability::MsiX)
+        let cap_addr = self
+            .find_capability(PciCapability::MsiX)
             .ok_or("PCI device does not support MSI-X")?;
+        let msix_reg_index = cap_addr >> 2;
+
+        // Enable MSIX (bit 15 of upper half-dword)
+        let mut header = self.read(msix_reg_index);
+        const MSIX_ENABLE: u32 = 1 << (16 + 15);
+        header |= MSIX_ENABLE;
+        self.write(msix_reg_index, header);
 
         Ok(())
     }
