@@ -189,9 +189,33 @@ impl PciDevice {
         }
     }
 
-    pub fn enable_msi(&self) -> Result<(), &'static str> {
-        self.find_capability(PciCapability::Msi)
+    /**
+     * `lapic_id`: core that the interrupt will be routed to
+     * `int_num`: interrupt vector to assign
+     */
+    pub fn enable_msi(&self, lapic_id: u8, int_num: u8) -> Result<(), &'static str> {
+        let cap_addr = self
+            .find_capability(PciCapability::Msi)
             .ok_or("PCI device does not support MSI")?;
+
+        let msi_reg_index = cap_addr >> 2;
+
+        // Message Address Register
+        const MSG_ADDR_REG_OFFSET: u8 = 1;
+        const MEMORY_REGION: u32 = 0x0FEE << 20;
+        let core = (lapic_id as u32) << 12;
+        self.write(msi_reg_index + MSG_ADDR_REG_OFFSET, MEMORY_REGION | core);
+
+        // Message Data Register
+        let mut header = self.read(msi_reg_index);
+        let is_64bit = header >> (16 + 7) & 1 > 0;
+        let msg_data_offset: u8 = if is_64bit { 3 } else { 2 };
+        self.write(msi_reg_index + msg_data_offset, int_num as u32);
+
+        // Enable MSI (bit 16 of header)
+        const MSI_ENABLE: u32 = 1;
+        header |= MSI_ENABLE << 16;
+        self.write(msi_reg_index, header);
 
         Ok(())
     }
