@@ -1,8 +1,7 @@
-use core::ptr::read_volatile;
-
 use alloc::sync::Arc;
 use log::error;
 use spin::Mutex;
+use volatile::Volatile;
 use x86_64::instructions::interrupts::without_interrupts;
 
 /**
@@ -133,13 +132,13 @@ pub(super) mod cfg {
     pub const RX_BUFFER_SIZE: usize = 8192;
 }
 
-#[derive(Copy, Clone)]
+#[derive(Clone)]
 #[repr(C, align(16))]
 pub struct E1000RxDesc {
     addr: u64,
     length: u16,
     checksum: u16,
-    status: u8,
+    status: Volatile<u8>,
     errors: u8,
     special: u16,
 }
@@ -176,7 +175,7 @@ impl Default for E1000RxDesc {
             addr: 0,
             length: 0,
             checksum: 0,
-            status: 0,
+            status: Volatile::new(0),
             errors: 0,
             special: 0,
         }
@@ -367,7 +366,7 @@ impl E1000 {
                     .add(curr_idx)
             };
 
-            if unsafe { read_volatile(&desc.status) } & cfg::tx::STATUS_DD == 0 {
+            if desc.status.read() & cfg::tx::STATUS_DD == 0 {
                 break;
             }
 
@@ -380,7 +379,7 @@ impl E1000 {
 
             RX_QUEUE.lock().push_back(packet.to_vec());
 
-            desc.status = 0;
+            desc.status.write(0);
 
             let old_cur = self.rx_cur;
             self.rx_cur = (self.rx_cur + 1) % (cfg::NUM_RX_DESC as u16);
@@ -413,7 +412,7 @@ impl E1000 {
             unsafe {
                 let desc = &mut *descs.add(i);
                 desc.addr = buf_phys;
-                desc.status = 0;
+                desc.status.write(0);
             }
         }
 
