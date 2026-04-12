@@ -32,7 +32,12 @@ pub fn alloc_dma_region(size: u64) -> MappedRegion {
 
     drop(frame_guard);
 
-    map_mmio(phys, aligned_size)
+    let region = map_mmio(phys, aligned_size);
+    unsafe {
+        core::ptr::write_bytes(region.as_mut_ptr::<u8>(), 0, region.len() as usize);
+    }
+
+    region
 }
 
 pub fn map_mmio(phys_addr: PhysAddr, size: u64) -> MappedRegion {

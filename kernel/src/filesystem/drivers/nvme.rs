@@ -160,8 +160,6 @@ impl NvmeController {
         // wait for controller to enable
         while (unsafe { self.read_reg(cfg::CSTS) } & 0x1) == 0 {}
 
-        println!("retrieving identity data structure");
-
         let identify_ctrlr =
             self.identify_read::<IdentifyController>(cfg::op::identify::CNS_CONTROLLER, |_| {});
         self.identify_ctlr = Some(identify_ctrlr);
@@ -320,8 +318,8 @@ impl NvmeController {
         unsafe { bar.write32(cfg::AQA, aqa) };
 
         unsafe {
-            bar.write64(cfg::ASQ, asq.phys());
-            bar.write64(cfg::ACQ, acq.phys());
+            bar.write64(cfg::ASQ, asq.phys().unwrap());
+            bar.write64(cfg::ACQ, acq.phys().unwrap());
         }
 
         (asq, acq)
@@ -330,7 +328,7 @@ impl NvmeController {
     fn submit_admin_command(&mut self, cmd: SQEntry) -> CQEntry {
         let sq = self.adm_subm_queue.as_mut().unwrap();
 
-        let slot = sq.virt() + (sq.tail as u64 * size_of::<SQEntry>() as u64);
+        let slot = sq.virt().unwrap() + (sq.tail as u64 * size_of::<SQEntry>() as u64);
         unsafe {
             write_volatile(slot as *mut SQEntry, cmd);
         };
@@ -349,13 +347,15 @@ impl NvmeController {
         loop {
             let (slot, phase) = {
                 let cq = self.adm_comp_queue.as_mut().unwrap();
-                let slot = cq.virt() + (cq.head as u64 * size_of::<CQEntry>() as u64);
+                let slot = cq.virt().unwrap() + (cq.head as u64 * size_of::<CQEntry>() as u64);
                 (slot, cq.phase)
             };
 
+            // info!("phase: {}", phase);
+
             let entry = unsafe { read_volatile(slot as *const CQEntry) };
 
-            if entry.status & 0x1 == phase as u16 {
+            if (entry.status & 0x1) == phase as u16 {
                 let doorbell = self.cq_doorbell(0);
                 let new_head = {
                     let cq = self.adm_comp_queue.as_mut().unwrap();
@@ -426,22 +426,22 @@ impl ControllerConfig {
     }
 
     pub fn set_iosqes(&mut self, iosqes: u32) -> &mut Self {
-        self.0 = (self.0 & !(0x7 << 16)) | ((iosqes & 0x7) << 16);
+        self.0 = (self.0 & !(0xF << 16)) | ((iosqes & 0xF) << 16);
         self
     }
 
     pub fn set_iocqes(&mut self, iocqes: u32) -> &mut Self {
-        self.0 = (self.0 & !(0x7 << 20)) | ((iocqes & 0x7) << 20);
+        self.0 = (self.0 & !(0xF << 20)) | ((iocqes & 0xF) << 20);
         self
     }
 
     pub fn set_ams(&mut self, ams: AmsType) -> &mut Self {
-        self.0 = (self.0 & !(0b11 << 11)) | ((ams as u32) << 11);
+        self.0 = (self.0 & !(0b111 << 11)) | ((ams as u32 & 0b111) << 11);
         self
     }
 
     pub fn set_mps(&mut self, mps: u32) -> &mut Self {
-        self.0 = (self.0 & !(0x7 << 7)) | ((mps & 0x7) << 7);
+        self.0 = (self.0 & !(0xF << 7)) | ((mps & 0xF) << 7);
         self
     }
 }
@@ -503,12 +503,12 @@ struct Queue {
 }
 
 impl Queue {
-    pub fn phys(&self) -> u64 {
-        self.region.as_ref().map(|r| r.phys().as_u64()).unwrap_or(0)
+    pub fn phys(&self) -> Option<u64> {
+        self.region.as_ref().map(|r| r.phys().as_u64())
     }
 
-    pub fn virt(&self) -> u64 {
-        self.region.as_ref().map(|r| r.virt().as_u64()).unwrap_or(0)
+    pub fn virt(&self) -> Option<u64> {
+        self.region.as_ref().map(|r| r.virt().as_u64())
     }
 }
 
