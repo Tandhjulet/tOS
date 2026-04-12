@@ -189,6 +189,20 @@ impl PciDevice {
         }
     }
 
+    pub fn enable_msi(&self) -> Result<(), &'static str> {
+        self.find_capability(PciCapability::Msi)
+            .ok_or("PCI device does not support MSI")?;
+
+        Ok(())
+    }
+
+    pub fn enable_msix(&self) -> Result<(), &'static str> {
+        self.find_capability(PciCapability::MsiX)
+            .ok_or("PCI device does not support MSI-X")?;
+
+        Ok(())
+    }
+
     pub fn is_pcie(&self) -> bool {
         self.ext_cfg.is_some() // check capabilities too?
     }
