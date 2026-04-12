@@ -11,7 +11,7 @@ use crate::{
     allocator::mmio::{MappedRegion, map_mmio},
     io::pci::{
         bar::Bar,
-        enumerator::{IoPci, McfgPci, PciEnumerator},
+        enumerator::{IoPci, MmioPci, PciEnumerator},
     },
     sys::acpi::{
         ACPI,
@@ -168,12 +168,13 @@ impl PciDevice {
         // last cap has ptr set to 0
         const FINAL_CAP_ADDR: u8 = 0;
         while cap_addr != FINAL_CAP_ADDR {
-            let cap_id = self.read(cap_addr) as u8;
+            let cap_dword = self.read(cap_addr) as u16;
+            let cap_id = cap_dword as u8;
             if cap_id == to_find {
                 return Some(cap_addr);
             }
 
-            let next_cap_ptr = self.read(cap_addr + 1) as u8;
+            let next_cap_ptr = (cap_dword >> 8) as u8;
             cap_addr = next_cap_ptr;
         }
 
@@ -296,6 +297,7 @@ impl PciDevice {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct InterruptSupport {
     pub isa: bool,
     pub msi: bool,
@@ -350,7 +352,7 @@ fn init_pcie() -> Result<(), String> {
     let mut devices = DEVICES.lock();
     let mcfg = unsafe { &*raw_mcfg.as_ptr() };
     for entry in mcfg.entries().iter() {
-        let enumerator = McfgPci::new(entry);
+        let enumerator = MmioPci::new(entry);
         let found = enumerator.enumerate();
 
         for new_dev in found {

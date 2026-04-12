@@ -55,7 +55,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     pci::init();
 
     // networking::init();
-    // filesystem::init();
+    filesystem::init();
 
     let mut executor = Executor::new();
     executor.spawn(Task::new(network_rx_task()));

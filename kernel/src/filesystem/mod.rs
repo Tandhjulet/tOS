@@ -1,7 +1,8 @@
 use alloc::{sync::Arc, vec::Vec};
+use log::info;
 use spin::Mutex;
 
-use crate::{filesystem::drivers::nvme::NvmeController, io::pci::PciDevice};
+use crate::{filesystem::drivers::nvme::NvmeController, io::pci::PciDevice, println};
 
 pub mod drivers;
 
@@ -25,6 +26,10 @@ pub fn init() {
     };
 
     for device in devices {
+        info!("locking....");
+        let intr_supp = device.lock().interrupt_support();
+        info!("{:?}", intr_supp);
+
         let driver = NvmeController::new(device);
     }
 }

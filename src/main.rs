@@ -38,9 +38,8 @@ fn main() {
         .arg("filter-dump,id=f1,netdev=net0,file=/tmp/dhcp.pcap");
     cmd.arg("-device").arg("e1000,netdev=net0");
 
-    // interrupts
-    cmd.arg("-d").arg("int");
-    cmd.arg("-D").arg("/tmp/qemu_int.log");
+    // MCFG, PCIe, etc.
+    cmd.arg("-M").arg("q35");
 
     // drives
     cmd.arg("-drive")
@@ -50,7 +49,7 @@ fn main() {
     // don't store
     cmd.arg("-snapshot");
 
-    cmd.arg("-serial").arg("stdio");
+    cmd.arg("-monitor").arg("stdio");
 
     if uefi {
         let prebuilt =

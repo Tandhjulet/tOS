@@ -153,14 +153,14 @@ impl PciEnumerator for IoPci {
     }
 }
 
-pub struct McfgPci<'a> {
+pub struct MmioPci<'a> {
     entry: &'a McfgEntry,
     bus_regions: Box<[OnceCell<MappedRegion>]>,
 }
 
-impl<'a> McfgPci<'a> {
+impl<'a> MmioPci<'a> {
     pub fn new(entry: &'a McfgEntry) -> Self {
-        let bus_count = (entry.bus_num_end - entry.bus_num_start + 1) as usize;
+        let bus_count = (entry.bus_num_end as usize) - (entry.bus_num_start as usize) + 1;
         Self {
             entry,
             bus_regions: (0..bus_count).map(|_| OnceCell::uninit()).collect(),
@@ -178,19 +178,22 @@ impl<'a> McfgPci<'a> {
         })
     }
 
+    pub fn get_addr(region: &MappedRegion, device: u8, function: u8, offset: u8) -> u64 {
+        region.virt().as_u64() + ((device as u64) << 15) + ((function as u64) << 12) + offset as u64
+    }
+
+    pub fn read(region: &MappedRegion, device: u8, function: u8, offset: u8) -> u32 {
+        let addr = Self::get_addr(region, device, function, offset);
+        unsafe { *(addr as *const u32) }
+    }
+
     pub fn read_raw(&self, bus: u8, device: u8, function: u8, offset: u8) -> u32 {
         let region = self.get_bus_region(bus);
-
-        let addr = region.virt().as_u64()
-            + ((device as u64) << 15)
-            + ((function as u64) << 12)
-            + offset as u64;
-
-        unsafe { *(addr as *const u32) }
+        Self::read(region, device, function, offset)
     }
 }
 
-impl PciEnumerator for McfgPci<'_> {
+impl PciEnumerator for MmioPci<'_> {
     fn read_u8(&self, bus: u8, device: u8, function: u8, offset: u8) -> u8 {
         (self.read_raw(bus, device, function, offset) & 0xFF) as u8
     }
