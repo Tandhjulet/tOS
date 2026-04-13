@@ -6,7 +6,7 @@ use core::{
 
 use alloc::{borrow::ToOwned, format, string::String, sync::Arc, vec::Vec};
 use lazy_static::lazy_static;
-use log::{error, info};
+use log::error;
 use num_enum::TryFromPrimitive;
 use spin::Mutex;
 use volatile::Volatile;
@@ -18,7 +18,6 @@ use crate::{
         bar::Bar,
         enumerator::{IoPci, MmioPci, PciEnumerator},
     },
-    println,
     sys::acpi::{
         ACPI,
         sdt::mcfg::{Mcfg, McfgEntry},

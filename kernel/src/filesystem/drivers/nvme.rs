@@ -1,4 +1,7 @@
-use core::ptr::{read_volatile, write_volatile};
+use core::{
+    marker::PhantomData,
+    ptr::{read_volatile, write_volatile},
+};
 
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use log::{error, info};
@@ -75,12 +78,12 @@ pub struct NvmeController {
 
     identify_ctlr: Option<IdentifyController>,
 
-    adm_comp_queue: Option<Queue>,
-    adm_subm_queue: Option<Queue>,
+    adm_comp_queue: Option<Queue<Completion>>,
+    adm_subm_queue: Option<Queue<Submission>>,
     adm_buf: MappedRegion,
 
-    io_subm_queues: Vec<Queue>,
-    io_comp_queues: Vec<Queue>,
+    io_subm_queues: Vec<Queue<Submission>>,
+    io_comp_queues: Vec<Queue<Completion>>,
 
     namespaces: Vec<NvmeNamespace>,
 }
@@ -318,6 +321,11 @@ impl NvmeController {
         matches!(csi, 0x00 | 0x03)
     }
 
+    pub fn create_io_submission_queue(&self) {
+        let queue: Queue<Submission> = Queue::default();
+        let mut entry = SQEntry::default();
+    }
+
     fn identify_read<T: Copy>(&mut self, cns: u32, cmd: impl FnOnce(&mut SQEntry)) -> T {
         self.identify(cns, cmd);
         let identify = unsafe { *(self.adm_buf.as_ptr::<T>()) };
@@ -366,7 +374,7 @@ impl NvmeController {
         unsafe { bar.read32(offset) }
     }
 
-    fn create_admin_queues(&self) -> (Queue, Queue) {
+    fn create_admin_queues(&self) -> (Queue<Submission>, Queue<Completion>) {
         let binding = self.device.lock();
         let Some(bar) = PciDevice::get_bar(&binding, 0) else {
             panic!("Could not find BAR0 for NVMe!");
@@ -378,13 +386,13 @@ impl NvmeController {
         asq.region = Some(alloc_dma_region(PAGE_SIZE));
         acq.region = Some(alloc_dma_region(PAGE_SIZE));
 
-        asq.size = 63;
-        acq.size = 63;
+        asq.state.size = 63;
+        acq.state.size = 63;
 
-        asq.phase = 1;
-        acq.phase = 1;
+        asq.state.phase = 1;
+        acq.state.phase = 1;
 
-        let aqa = ((acq.size as u32) << 16) | (asq.size as u32);
+        let aqa = ((acq.state.size as u32) << 16) | (asq.state.size as u32);
         unsafe { bar.write32(cfg::AQA, aqa) };
 
         unsafe {
@@ -398,13 +406,13 @@ impl NvmeController {
     fn submit_admin_command(&mut self, cmd: SQEntry) -> CQEntry {
         let sq = self.adm_subm_queue.as_mut().unwrap();
 
-        let slot = sq.virt().unwrap() + (sq.tail as u64 * size_of::<SQEntry>() as u64);
+        let slot = sq.virt().unwrap() + (sq.state.tail as u64 * size_of::<SQEntry>() as u64);
         unsafe {
             write_volatile(slot as *mut SQEntry, cmd);
         };
 
-        sq.tail = (sq.tail + 1) % (sq.size as u16 + 1);
-        let tail = sq.tail;
+        sq.state.tail = (sq.state.tail + 1) % (sq.state.size as u16 + 1);
+        let tail = sq.state.tail;
         let doorbell = self.sq_doorbell(0);
         unsafe {
             self.write_reg(doorbell, tail as u32);
@@ -417,8 +425,9 @@ impl NvmeController {
         loop {
             let (slot, phase) = {
                 let cq = self.adm_comp_queue.as_mut().unwrap();
-                let slot = cq.virt().unwrap() + (cq.head as u64 * size_of::<CQEntry>() as u64);
-                (slot, cq.phase)
+                let slot =
+                    cq.virt().unwrap() + (cq.state.head as u64 * size_of::<CQEntry>() as u64);
+                (slot, cq.state.phase)
             };
 
             // info!("phase: {}", phase);
@@ -429,13 +438,13 @@ impl NvmeController {
                 let doorbell = self.cq_doorbell(0);
                 let new_head = {
                     let cq = self.adm_comp_queue.as_mut().unwrap();
-                    cq.head += 1;
-                    if cq.head > cq.size as u16 {
-                        cq.head = 0;
-                        cq.phase ^= 1; // flip phase on wraparound
+                    cq.state.head += 1;
+                    if cq.state.head > cq.state.size as u16 {
+                        cq.state.head = 0;
+                        cq.state.phase ^= 1; // flip phase on wraparound
                     }
 
-                    cq.head
+                    cq.state.head
                 };
 
                 unsafe { self.write_reg(doorbell, new_head as u32) };
@@ -562,9 +571,18 @@ impl ControllerCap {
     }
 }
 
+trait QueueKind {}
+
 #[derive(Default)]
-struct Queue {
-    region: Option<MappedRegion>,
+struct Submission;
+#[derive(Default)]
+struct Completion;
+
+impl QueueKind for Submission {}
+impl QueueKind for Completion {}
+
+#[derive(Default)]
+struct RingQueueState {
     size: u64,
 
     tail: u16,
@@ -572,7 +590,14 @@ struct Queue {
     phase: u8,
 }
 
-impl Queue {
+#[derive(Default)]
+struct Queue<K: QueueKind> {
+    region: Option<MappedRegion>,
+    state: RingQueueState,
+    _phantom: PhantomData<K>,
+}
+
+impl<K: QueueKind> Queue<K> {
     pub fn phys(&self) -> Option<u64> {
         self.region.as_ref().map(|r| r.phys().as_u64())
     }
@@ -581,6 +606,8 @@ impl Queue {
         self.region.as_ref().map(|r| r.virt().as_u64())
     }
 }
+
+impl Queue<Submission> {}
 
 #[derive(Default)]
 #[repr(C)]
