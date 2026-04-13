@@ -4,7 +4,7 @@ use core::{
 };
 
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
-use log::{error, info};
+use log::error;
 use spin::Mutex;
 
 use crate::{
@@ -78,12 +78,10 @@ pub struct NvmeController {
 
     identify_ctlr: Option<IdentifyController>,
 
-    adm_comp_queue: Option<Queue<Completion>>,
-    adm_subm_queue: Option<Queue<Submission>>,
+    adm_queue: Option<QueuePair>,
     adm_buf: MappedRegion,
 
-    io_subm_queues: Vec<Queue<Submission>>,
-    io_comp_queues: Vec<Queue<Completion>>,
+    io_queue: Vec<QueuePair>,
 
     namespaces: Vec<NvmeNamespace>,
 }
@@ -105,10 +103,8 @@ impl NvmeController {
                 device: Arc::clone(&device),
                 cap,
                 identify_ctlr: None,
-                adm_comp_queue: None,
-                adm_subm_queue: None,
-                io_comp_queues: Vec::new(),
-                io_subm_queues: Vec::new(),
+                adm_queue: None,
+                io_queue: Vec::new(),
                 adm_buf: alloc_dma_region(PAGE_SIZE),
                 namespaces: Vec::new(),
             }
@@ -146,9 +142,8 @@ impl NvmeController {
         // wait for controller to disable
         while (unsafe { controller.read_reg(cfg::CSTS) } & 0x1) == 1 {}
 
-        let (asq, acq) = controller.create_admin_queues();
-        controller.adm_comp_queue = Some(acq);
-        controller.adm_subm_queue = Some(asq);
+        let admin_queues = controller.create_admin_queues();
+        controller.adm_queue = Some(admin_queues);
 
         let mut cfg = controller.get_configuration();
 
@@ -289,8 +284,6 @@ impl NvmeController {
             InterruptMode::Msi => todo!(),
             InterruptMode::Legacy => todo!(),
         }
-
-        for i in 0..io_comp_queues {}
     }
 
     pub fn nvme_int_handler(&self) -> IrqResult {
@@ -374,7 +367,7 @@ impl NvmeController {
         unsafe { bar.read32(offset) }
     }
 
-    fn create_admin_queues(&self) -> (Queue<Submission>, Queue<Completion>) {
+    fn create_admin_queues(&self) -> QueuePair {
         let binding = self.device.lock();
         let Some(bar) = PciDevice::get_bar(&binding, 0) else {
             panic!("Could not find BAR0 for NVMe!");
@@ -400,11 +393,14 @@ impl NvmeController {
             bar.write64(cfg::ACQ, acq.phys().unwrap());
         }
 
-        (asq, acq)
+        QueuePair {
+            subm: asq,
+            comp: acq,
+        }
     }
 
     fn submit_admin_command(&mut self, cmd: SQEntry) -> CQEntry {
-        let sq = self.adm_subm_queue.as_mut().unwrap();
+        let sq = &mut self.adm_queue.as_mut().unwrap().subm;
 
         let slot = sq.virt().unwrap() + (sq.state.tail as u64 * size_of::<SQEntry>() as u64);
         unsafe {
@@ -424,7 +420,7 @@ impl NvmeController {
     fn poll_admin_completion(&mut self) -> CQEntry {
         loop {
             let (slot, phase) = {
-                let cq = self.adm_comp_queue.as_mut().unwrap();
+                let cq = &self.adm_queue.as_mut().unwrap().comp;
                 let slot =
                     cq.virt().unwrap() + (cq.state.head as u64 * size_of::<CQEntry>() as u64);
                 (slot, cq.state.phase)
@@ -437,7 +433,7 @@ impl NvmeController {
             if (entry.status & 0x1) == phase as u16 {
                 let doorbell = self.cq_doorbell(0);
                 let new_head = {
-                    let cq = self.adm_comp_queue.as_mut().unwrap();
+                    let cq = &mut self.adm_queue.as_mut().unwrap().comp;
                     cq.state.head += 1;
                     if cq.state.head > cq.state.size as u16 {
                         cq.state.head = 0;
@@ -581,13 +577,28 @@ struct Completion;
 impl QueueKind for Submission {}
 impl QueueKind for Completion {}
 
-#[derive(Default)]
 struct RingQueueState {
     size: u64,
 
     tail: u16,
     head: u16,
     phase: u8,
+}
+
+impl Default for RingQueueState {
+    fn default() -> Self {
+        Self {
+            size: Default::default(),
+            tail: Default::default(),
+            head: Default::default(),
+            phase: 1,
+        }
+    }
+}
+
+struct QueuePair {
+    subm: Queue<Submission>,
+    comp: Queue<Completion>,
 }
 
 #[derive(Default)]
