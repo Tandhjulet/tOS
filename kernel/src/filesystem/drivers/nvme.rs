@@ -1,7 +1,7 @@
 use core::ptr::{read_volatile, write_volatile};
 
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
-use log::error;
+use log::{error, info};
 use spin::Mutex;
 
 use crate::{

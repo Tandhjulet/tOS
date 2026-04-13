@@ -1,12 +1,12 @@
 use core::{
     fmt,
     ops::{Deref, DerefMut},
-    ptr, slice,
+    slice,
 };
 
 use alloc::{borrow::ToOwned, format, string::String, sync::Arc, vec::Vec};
 use lazy_static::lazy_static;
-use log::error;
+use log::{error, info};
 use num_enum::TryFromPrimitive;
 use spin::Mutex;
 use volatile::Volatile;
@@ -18,6 +18,7 @@ use crate::{
         bar::Bar,
         enumerator::{IoPci, MmioPci, PciEnumerator},
     },
+    println,
     sys::acpi::{
         ACPI,
         sdt::mcfg::{Mcfg, McfgEntry},
@@ -244,16 +245,15 @@ impl PciDevice {
         let cap_addr = self
             .find_capability(PciCapability::MsiX)
             .ok_or("PCI device does not support MSI-X")?;
-        let msix_reg_index = cap_addr >> 2;
 
-        const VECTOR_TABLE_OFF: u8 = 1;
-        let table = self.read(msix_reg_index + VECTOR_TABLE_OFF);
+        const VECTOR_TABLE_OFF: u8 = 4;
+        let table = self.read(cap_addr + VECTOR_TABLE_OFF);
         let bir = table & 0x7;
         let Some(bar) = self.get_bar(bir as usize) else {
             Err("Failed finding MSI-X bar for PCI device!")?
         };
 
-        let ctrl = self.read(msix_reg_index) >> 16;
+        let ctrl = self.read(cap_addr) >> 16;
         let table_size = ctrl & 0x3FF;
         let table_offset = table >> 3;
 
