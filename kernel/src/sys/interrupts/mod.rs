@@ -64,7 +64,7 @@ impl InterruptController {
 pub enum InterruptMode {
     MsiX,
     Msi,
-    Isa,
+    Legacy,
 }
 
 pub enum InterruptControllerType {

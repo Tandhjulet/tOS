@@ -279,7 +279,7 @@ impl NvmeController {
                 map[0].init(cpu_id, admin_vector as u32);
             }
             InterruptMode::Msi => todo!(),
-            InterruptMode::Isa => todo!(),
+            InterruptMode::Legacy => todo!(),
         }
     }
 
