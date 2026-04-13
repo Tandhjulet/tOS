@@ -415,19 +415,14 @@ pub struct MsixVectorEntry {
 impl MsixVectorEntry {
     const UNMASK_INT: u32 = 0;
     const DEST_ID_SHIFT: u32 = 12;
-    const ADDR_BITS: u32 = 0xFFFF_FFF0;
     const RSVD_INTR_REG: u32 = 0xFEE << 20;
 
     pub fn init(&mut self, cpu_id: u8, int_num: u32) {
-        self.vector_ctrl.write(Self::UNMASK_INT);
-
         let dest_id = (cpu_id as u32) << Self::DEST_ID_SHIFT;
-        let lwr_addr = self.msg_low_addr.read();
-        let addr = lwr_addr & !Self::ADDR_BITS;
-        self.msg_low_addr
-            .write(addr | Self::RSVD_INTR_REG | dest_id);
-
+        self.msg_low_addr.write(Self::RSVD_INTR_REG | dest_id);
+        self.msg_high_addr.write(0);
         self.msg_data.write(int_num);
+        self.vector_ctrl.write(Self::UNMASK_INT);
     }
 }
 

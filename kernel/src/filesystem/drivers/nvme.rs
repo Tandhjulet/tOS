@@ -1,6 +1,7 @@
 use core::ptr::{read_volatile, write_volatile};
 
-use alloc::{sync::Arc, vec::Vec};
+use alloc::{boxed::Box, sync::Arc, vec::Vec};
+use log::error;
 use spin::Mutex;
 
 use crate::{
@@ -8,10 +9,16 @@ use crate::{
     filesystem::drivers::StorageDevice,
     io::pci::{PciDevice, bar::Bar},
     println,
+    sys::interrupts::{
+        self, INTERRUPT_CONTROLLER, InterruptControllerType, InterruptMode, IrqResult,
+    },
 };
 
 /**
- * Base specification: https://nvmexpress.org/wp-content/uploads/NVMe-NVM-Express-2.0a-2021.07.26-Ratified.pdf
+ * NVMe Documentation:
+ *
+ * - Base specification: https://nvmexpress.org/wp-content/uploads/NVMe-NVM-Express-2.0a-2021.07.26-Ratified.pdf
+ * - NVMe over PCIe specification: https://nvmexpress.org/wp-content/uploads/NVM-Express-NVMe-over-PCIe-Transport-Specification-Revision-1.3-2025.08.01-Ratified.pdf
  */
 pub mod cfg {
     pub const IO_QUEUES: u16 = 2;
@@ -76,8 +83,8 @@ pub struct NvmeController {
 }
 
 impl NvmeController {
-    pub fn new(device: Arc<Mutex<PciDevice>>) -> Self {
-        let mut driver = {
+    pub fn new(device: Arc<Mutex<PciDevice>>) -> Arc<Mutex<NvmeController>> {
+        let driver = {
             let binding = device.lock();
             let Some(bar) = PciDevice::get_bar(&binding, 0) else {
                 panic!("Could not find BAR0 for NVMe!");
@@ -99,7 +106,8 @@ impl NvmeController {
             }
         };
 
-        driver.init();
+        let driver = Arc::new(Mutex::new(driver));
+        NvmeController::init(&driver);
         driver
     }
 
@@ -120,28 +128,30 @@ impl NvmeController {
         ControllerConfig(cc)
     }
 
-    fn init(&mut self) {
-        let mut cfg = self.get_configuration();
+    fn init(this: &Arc<Mutex<Self>>) {
+        let mut controller = this.lock();
+
+        let mut cfg = controller.get_configuration();
         cfg.set_enabled(false);
-        unsafe { self.write_reg(cfg::CC, cfg.raw()) };
+        unsafe { controller.write_reg(cfg::CC, cfg.raw()) };
 
         // wait for controller to disable
-        while (unsafe { self.read_reg(cfg::CSTS) } & 0x1) == 1 {}
+        while (unsafe { controller.read_reg(cfg::CSTS) } & 0x1) == 1 {}
 
-        let (asq, acq) = self.create_admin_queues();
-        self.adm_comp_queue = Some(acq);
-        self.adm_subm_queue = Some(asq);
+        let (asq, acq) = controller.create_admin_queues();
+        controller.adm_comp_queue = Some(acq);
+        controller.adm_subm_queue = Some(asq);
 
-        let mut cfg = self.get_configuration();
+        let mut cfg = controller.get_configuration();
 
         // MPS is defined as page_size = (2 ^ (12 + MPS))
         // since page_size = 4096 => MPS = 0
         let mps = 0;
 
         let mut css = 0b000u8;
-        if self.cap.css_none() {
+        if controller.cap.css_none() {
             css = 0b111;
-        } else if self.cap.css_some() {
+        } else if controller.cap.css_some() {
             css = 0b110;
         }
 
@@ -152,34 +162,34 @@ impl NvmeController {
             .set_iocqes(4) // Comp entry size: 2^4 = 16 bytes
             .set_iosqes(6); // Subm entry size: 2^6 = 64 bytes
 
-        unsafe { self.write_reg(cfg::CC, cfg.raw()) };
+        unsafe { controller.write_reg(cfg::CC, cfg.raw()) };
 
         cfg.set_enabled(true);
-        unsafe { self.write_reg(cfg::CC, cfg.raw()) };
+        unsafe { controller.write_reg(cfg::CC, cfg.raw()) };
 
         // wait for controller to enable
-        while (unsafe { self.read_reg(cfg::CSTS) } & 0x1) == 0 {}
+        while (unsafe { controller.read_reg(cfg::CSTS) } & 0x1) == 0 {}
 
-        let identify_ctrlr =
-            self.identify_read::<IdentifyController>(cfg::op::identify::CNS_CONTROLLER, |_| {});
-        self.identify_ctlr = Some(identify_ctrlr);
+        let identify_ctrlr = controller
+            .identify_read::<IdentifyController>(cfg::op::identify::CNS_CONTROLLER, |_| {});
+        controller.identify_ctlr = Some(identify_ctrlr);
 
         if cfg.css() == 0 {
             // TODO
         }
-        if self.cap.css_some() {
-            let cmd_set =
-                self.identify_read::<IdentifyCommandSet>(cfg::op::identify::CNS_CMD_SET, |_| {});
+        if controller.cap.css_some() {
+            let cmd_set = controller
+                .identify_read::<IdentifyCommandSet>(cfg::op::identify::CNS_CMD_SET, |_| {});
             let selected_cmd_idx = cmd_set.first_valid().unwrap();
 
             // Refer to section 5.27.1.21 for documentation regarding
             // I/O Command Set Profile (FID: 0x19)
-            self.set_features(cfg::op::features::FID_SET_PROFILE, |features| {
+            controller.set_features(cfg::op::features::FID_SET_PROFILE, |features| {
                 features.cdw11 = selected_cmd_idx as u32;
             });
 
             for csi in cmd_set.csi_iter(selected_cmd_idx) {
-                let nsids = self.identify_read::<IdentifyNamespaceList>(
+                let nsids = controller.identify_read::<IdentifyNamespaceList>(
                     cfg::op::identify::CNS_ACTIVE_NS_CMD_SET,
                     |identify| {
                         identify.nsid = 0;
@@ -191,7 +201,7 @@ impl NvmeController {
 
                 for &nsid in nsids.valid() {
                     let nvm_base = if Self::is_csi_nvm_based(csi) {
-                        let ns_nvm = self.identify_read::<IdentifyNamespaceNvm>(
+                        let ns_nvm = controller.identify_read::<IdentifyNamespaceNvm>(
                             cfg::op::identify::CNS_NAMESPACE,
                             |cmd| {
                                 cmd.nsid = nsid;
@@ -204,23 +214,23 @@ impl NvmeController {
                     };
 
                     // TODO: store this; it's CSI-dependent and contains specific meta
-                    self.identify(cfg::op::identify::CNS_SPECIFIC_NS, |cmd| {
+                    controller.identify(cfg::op::identify::CNS_SPECIFIC_NS, |cmd| {
                         cmd.nsid = nsid;
                         cmd.cdw11 = (csi as u32) << 24;
                     });
 
-                    self.identify(cfg::op::identify::CNS_SPECIFIC_CTRLR, |cmd| {
+                    controller.identify(cfg::op::identify::CNS_SPECIFIC_CTRLR, |cmd| {
                         cmd.cdw11 = (csi as u32) << 24;
                     });
 
-                    let independent = self.identify_read::<IdentifyNamespaceIndependent>(
+                    let independent = controller.identify_read::<IdentifyNamespaceIndependent>(
                         cfg::op::identify::CNS_NAMESPACE_INDEPENDENT,
                         |cmd| {
                             cmd.nsid = nsid;
                         },
                     );
 
-                    self.namespaces.push(NvmeNamespace {
+                    controller.namespaces.push(NvmeNamespace {
                         nsid,
                         csi,
                         nvm_base,
@@ -230,9 +240,10 @@ impl NvmeController {
             }
         }
 
-        let io_queue_count_raw = self.set_features(cfg::op::features::FID_NUM_QUEUES, |cmd| {
-            cmd.cdw11 = ((cfg::IO_QUEUES as u32) << 16) | cfg::IO_QUEUES as u32;
-        });
+        let io_queue_count_raw =
+            controller.set_features(cfg::op::features::FID_NUM_QUEUES, |cmd| {
+                cmd.cdw11 = ((cfg::IO_QUEUES as u32) << 16) | cfg::IO_QUEUES as u32;
+            });
 
         let io_comp_queues = (io_queue_count_raw.dw0 >> 16) as u16;
         let io_subm_queues = io_queue_count_raw.dw0 as u16;
@@ -242,6 +253,58 @@ impl NvmeController {
                 io_comp_queues, io_subm_queues
             );
         }
+
+        match controller.setup_pci_interrupt_mode() {
+            InterruptMode::MsiX => {
+                let lock = controller.device.lock();
+                let mut map = lock
+                    .get_msix_tables()
+                    .expect("MSI-X tables should be present as MSI-X is enabled");
+
+                let cpu_id = match &*INTERRUPT_CONTROLLER.get() {
+                    InterruptControllerType::Apic(apic_info) => apic_info.lapic.id(),
+                    _ => panic!("Using MSI-X, the interrupt controller should always be APIC!"),
+                };
+
+                let weak = Arc::downgrade(&this);
+                let admin_vector = interrupts::allocate_interrupt(Box::new(move || {
+                    if let Some(ctrlr) = weak.upgrade() {
+                        ctrlr.lock().nvme_int_handler()
+                    } else {
+                        IrqResult::EoiNeeded
+                    }
+                }))
+                .expect("should be available interrupt vectors");
+
+                map[0].init(cpu_id, admin_vector as u32);
+            }
+            InterruptMode::Msi => todo!(),
+            InterruptMode::Isa => todo!(),
+        }
+    }
+
+    pub fn nvme_int_handler(&self) -> IrqResult {
+        println!("IRQ!");
+        IrqResult::EoiNeeded
+    }
+
+    pub fn setup_pci_interrupt_mode(&self) -> InterruptMode {
+        let mut interrupt_mode: Option<InterruptMode> = None;
+        let supported_interrupts = self.device.lock().interrupt_support();
+        if supported_interrupts.msix {
+            match self.device.lock().enable_msix() {
+                Ok(_) => interrupt_mode = Some(InterruptMode::MsiX),
+                Err(msg) => error!("NVMe MSI-X: {}", msg),
+            }
+        }
+
+        if supported_interrupts.msi && interrupt_mode.is_none() {
+            todo!()
+        }
+
+        interrupt_mode.unwrap_or_else(|| {
+            panic!("NVMe: no suitable interrupt mode could be enabled");
+        })
     }
 
     fn is_csi_nvm_based(csi: u8) -> bool {

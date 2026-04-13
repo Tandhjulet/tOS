@@ -1,4 +1,4 @@
-use alloc::sync::Arc;
+use alloc::{boxed::Box, sync::Arc};
 use log::error;
 use spin::Mutex;
 use volatile::Volatile;
@@ -502,7 +502,7 @@ impl NetworkDriver for E1000 {
         without_interrupts(|| {
             interrupts::register_handler(
                 self.interrupt_line + MIN_INTERRUPT as u8,
-                <dyn NetworkDriver>::fire,
+                Box::new(<dyn NetworkDriver>::fire),
             );
 
             if let Err(msg) = unsafe { INTERRUPT_CONTROLLER.unmask_irq(self.interrupt_line) } {

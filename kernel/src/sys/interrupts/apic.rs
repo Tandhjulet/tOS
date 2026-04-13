@@ -87,8 +87,8 @@ impl Lapic {
         unsafe { self.write(Self::TPR_OFFSET, 0) };
     }
 
-    pub fn id(&self) -> u32 {
-        unsafe { self.read(Self::ID_OFFSET) }
+    pub fn id(&self) -> u8 {
+        ((unsafe { self.read(Self::ID_OFFSET) }) >> 24) as u8
     }
 
     pub fn eoi(&self) {
