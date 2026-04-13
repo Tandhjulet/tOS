@@ -223,9 +223,9 @@ pub fn register_handler(vector: u8, handler: Box<dyn Fn() -> IrqResult + Send>) 
     without_interrupts(|| HANDLERS.lock()[vector as usize - MIN_INTERRUPT] = Some(handler))
 }
 
-/**
- * Maps interrupt to IRQ line and enables that line
- */
+///
+/// Maps interrupt to IRQ line and enables that line
+///
 pub fn enable_interrupt(vector: u8) -> Result<(), String> {
     without_interrupts(|| unsafe { INTERRUPT_CONTROLLER.unmask_irq(vector - MIN_INTERRUPT as u8) })
 }

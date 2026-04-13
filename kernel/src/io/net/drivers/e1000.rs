@@ -4,11 +4,11 @@ use spin::Mutex;
 use volatile::Volatile;
 use x86_64::instructions::interrupts::without_interrupts;
 
-/**
- * See https://www.intel.com/content/dam/doc/manual/pci-pci-x-family-gbe-controllers-software-dev-manual.pdf#page389
-	* or (https://wiki.osdev.org/Intel_Ethernet_i217) for documentation
-	* details regarding the implementation of the E1000 driver.
-	*/
+///
+/// See https://www.intel.com/content/dam/doc/manual/pci-pci-x-family-gbe-controllers-software-dev-manual.pdf#page389
+/// or (https://wiki.osdev.org/Intel_Ethernet_i217) for documentation details
+/// regarding the implementation of the E1000 driver.
+///
 use crate::{
     allocator::mmio::{MappedRegion, alloc_dma_region},
     interrupts::MIN_INTERRUPT,

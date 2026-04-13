@@ -14,12 +14,12 @@ use crate::{
     },
 };
 
-/**
- * NVMe Documentation:
- *
- * - Base specification: https://nvmexpress.org/wp-content/uploads/NVMe-NVM-Express-2.0a-2021.07.26-Ratified.pdf
- * - NVMe over PCIe specification: https://nvmexpress.org/wp-content/uploads/NVM-Express-NVMe-over-PCIe-Transport-Specification-Revision-1.3-2025.08.01-Ratified.pdf
- */
+///
+/// NVMe Documentation:
+/// - Base specification: https://nvmexpress.org/wp-content/uploads/NVMe-NVM-Express-2.0a-2021.07.26-Ratified.pdf
+/// - NVMe over PCIe specification: https://nvmexpress.org/wp-content/uploads/NVM-Express-NVMe-over-PCIe-Transport-Specification-Revision-1.3-2025.08.01-Ratified.pdf
+/// - NVM Host Controller Interface (has good overview over commands): https://www.nvmexpress.org/wp-content/uploads/NVM-Express-1_1a.pdf
+///
 pub mod cfg {
     pub const IO_QUEUES: u16 = 2;
 
@@ -79,6 +79,9 @@ pub struct NvmeController {
     adm_subm_queue: Option<Queue>,
     adm_buf: MappedRegion,
 
+    io_subm_queues: Vec<Queue>,
+    io_comp_queues: Vec<Queue>,
+
     namespaces: Vec<NvmeNamespace>,
 }
 
@@ -101,6 +104,8 @@ impl NvmeController {
                 identify_ctlr: None,
                 adm_comp_queue: None,
                 adm_subm_queue: None,
+                io_comp_queues: Vec::new(),
+                io_subm_queues: Vec::new(),
                 adm_buf: alloc_dma_region(PAGE_SIZE),
                 namespaces: Vec::new(),
             }
@@ -281,6 +286,8 @@ impl NvmeController {
             InterruptMode::Msi => todo!(),
             InterruptMode::Legacy => todo!(),
         }
+
+        for i in 0..io_comp_queues {}
     }
 
     pub fn nvme_int_handler(&self) -> IrqResult {
@@ -535,9 +542,9 @@ impl ControllerCap {
         ((self.0 >> 48) & 0xF) as u8
     }
 
-    /**
-     * Command Sets Supported (CSS)
-     */
+    ///
+    /// Command Sets Supported (CSS)
+    ///
     pub fn css(&self) -> u8 {
         ((self.0 >> 37) & 0xFF) as u8
     }
@@ -655,10 +662,10 @@ impl IdentifyNamespaceList {
     }
 }
 
-/**
- * Refer to https://nvmexpress.org/wp-content/uploads/NVM-Express-NVM-Command-Set-Specification-Revision-1.1-2024.08.05-Ratified.pdf
- * figure 114 for documentation regarding the implementation
- */
+///
+/// Refer to https://nvmexpress.org/wp-content/uploads/NVM-Express-NVM-Command-Set-Specification-Revision-1.1-2024.08.05-Ratified.pdf
+/// figure 114 for documentation regarding the implementation
+///
 #[derive(Clone, Copy)]
 #[repr(C)]
 pub struct IdentifyNamespaceNvm {

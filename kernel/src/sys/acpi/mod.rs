@@ -15,10 +15,10 @@ pub mod sdt;
 
 pub static ACPI: OnceCell<Acpi> = OnceCell::uninit();
 
-/**
- * This ACPI implementation is heavily inspired by https://github.com/rust-osdev/acpi
- * and the amazing documentation at wiki.osdev.org!
- */
+///
+/// This ACPI implementation is heavily inspired by https://github.com/rust-osdev/acpi
+/// and the amazing documentation at wiki.osdev.org!
+///
 pub struct Acpi {
     tables: AcpiTables,
 }

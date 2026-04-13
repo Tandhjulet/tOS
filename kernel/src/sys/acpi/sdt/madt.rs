@@ -50,10 +50,10 @@ pub struct MadtEntryIter<'a> {
     _phantom: PhantomData<&'a ()>,
 }
 
-/**
- * See UEFI documentation at
- * https://uefi.org/specs/ACPI/6.5/05_ACPI_Software_Programming_Model.html#multiple-apic-description-table-madt
- */
+///
+/// See UEFI documentation at
+/// https://uefi.org/specs/ACPI/6.5/05_ACPI_Software_Programming_Model.html#multiple-apic-description-table-madt
+///
 #[derive(TryFromPrimitive, Clone, Copy, Debug)]
 #[repr(u8)]
 pub enum MadtEntryKind {

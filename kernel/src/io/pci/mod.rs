@@ -195,10 +195,11 @@ impl PciDevice {
         }
     }
 
-    /**
-     * `lapic_id`: core that the interrupt will be routed to
-     * `int_num`: interrupt vector to assign
-     */
+    ///
+    /// ### Arguments
+    /// `lapic_id`: core that the interrupt will be routed to
+    /// `int_num`: interrupt vector to assign
+    ///
     pub fn enable_msi(&self, lapic_id: u8, int_num: u8) -> Result<(), &'static str> {
         let cap_addr = self
             .find_capability(PciCapability::Msi)
