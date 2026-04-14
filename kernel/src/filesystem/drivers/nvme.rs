@@ -1,4 +1,5 @@
 use core::{
+    cmp::min,
     marker::PhantomData,
     ptr::{read_volatile, write_volatile},
 };
@@ -6,9 +7,10 @@ use core::{
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use log::error;
 use spin::Mutex;
+use x86_64::align_up;
 
 use crate::{
-    allocator::mmio::{MappedRegion, PAGE_SIZE, alloc_dma_region},
+    allocator::mmio::{MappedRegion, PAGE_SIZE, alloc_dma_region, map_mmio},
     filesystem::drivers::StorageDevice,
     io::pci::{PciDevice, bar::Bar},
     println,
@@ -243,19 +245,7 @@ impl NvmeController {
             }
         }
 
-        let io_queue_count_raw =
-            controller.set_features(cfg::op::features::FID_NUM_QUEUES, |cmd| {
-                cmd.cdw11 = ((cfg::IO_QUEUES as u32) << 16) | cfg::IO_QUEUES as u32;
-            });
-
-        let io_comp_queues = (io_queue_count_raw.dw0 >> 16) as u16;
-        let io_subm_queues = io_queue_count_raw.dw0 as u16;
-        if io_comp_queues != io_subm_queues {
-            println!(
-                "WARNING: using inequal IO queues (comp queues: {}, submission queues: {})",
-                io_comp_queues, io_subm_queues
-            );
-        }
+        let queue_cnt = controller.init_queue_cnt();
 
         match controller.setup_pci_interrupt_mode() {
             InterruptMode::MsiX => {
@@ -286,6 +276,48 @@ impl NvmeController {
         }
     }
 
+    // pub fn create_io_subm_queue(
+    //     &self,
+    //     max_entries: usize,
+    //     id: u32,
+    //     comp_id: u32,
+    // ) -> Queue<Submission> {
+    //     let size = max_entries * size_of::<SQEntry>();
+    //     let page_count = align_up(size as u64, PAGE_SIZE) / PAGE_SIZE;
+
+    //     let pages = alloc_dma_region(size as u64);
+
+    //     let entry = SQEntry::default();
+    //     entry.prp1 = pages.phys().as_u64();
+
+    //     entry.cdw10 = (id & 0xfffff) | ((max_entries as u32 - 1) << 16);
+
+    //     const PHYS_CONTIG: u32 = 1;
+    //     entry.cdw11 = PHYS_CONTIG | (comp_id << 16);
+
+    //     let cq = self.submit_admin_command(entry);
+    // }
+
+    // pub fn create_io_comp_queue(&self) -> Queue<Completion> {}
+
+    // pub fn create_io_queue(&self) -> QueuePair {
+    //     let subm = self.create_io_subm_queue();
+    //     let comp = self.create_io_comp_queue();
+
+    //     QueuePair { subm: (), comp: () }
+    // }
+
+    fn init_queue_cnt(&mut self) -> u16 {
+        let io_queue_count_raw = self.set_features(cfg::op::features::FID_NUM_QUEUES, |cmd| {
+            cmd.cdw11 = ((cfg::IO_QUEUES as u32) << 16) | cfg::IO_QUEUES as u32;
+        });
+
+        let io_comp_queues = (io_queue_count_raw.dw0 >> 16) as u16;
+        let io_subm_queues = io_queue_count_raw.dw0 as u16;
+
+        min(io_comp_queues, io_subm_queues)
+    }
+
     pub fn nvme_int_handler(&self) -> IrqResult {
         println!("IRQ!");
         IrqResult::EoiNeeded
@@ -312,11 +344,6 @@ impl NvmeController {
 
     fn is_csi_nvm_based(csi: u8) -> bool {
         matches!(csi, 0x00 | 0x03)
-    }
-
-    pub fn create_io_submission_queue(&self) {
-        let queue: Queue<Submission> = Queue::default();
-        let mut entry = SQEntry::default();
     }
 
     fn identify_read<T: Copy>(&mut self, cns: u32, cmd: impl FnOnce(&mut SQEntry)) -> T {
@@ -382,9 +409,6 @@ impl NvmeController {
         asq.state.size = 63;
         acq.state.size = 63;
 
-        asq.state.phase = 1;
-        acq.state.phase = 1;
-
         let aqa = ((acq.state.size as u32) << 16) | (asq.state.size as u32);
         unsafe { bar.write32(cfg::AQA, aqa) };
 
@@ -430,14 +454,14 @@ impl NvmeController {
 
             let entry = unsafe { read_volatile(slot as *const CQEntry) };
 
-            if (entry.status & 0x1) == phase as u16 {
+            if entry.status.phase_tag() == phase {
                 let doorbell = self.cq_doorbell(0);
                 let new_head = {
                     let cq = &mut self.adm_queue.as_mut().unwrap().comp;
                     cq.state.head += 1;
                     if cq.state.head > cq.state.size as u16 {
                         cq.state.head = 0;
-                        cq.state.phase ^= 1; // flip phase on wraparound
+                        cq.state.phase = !cq.state.phase; // flip phase on wraparound
                     }
 
                     cq.state.head
@@ -445,8 +469,8 @@ impl NvmeController {
 
                 unsafe { self.write_reg(doorbell, new_head as u32) };
 
-                if (entry.status >> 1) != 0 {
-                    panic!("NVMe admin command failed: status={:#x}", entry.status >> 1);
+                if !entry.status.is_success() {
+                    panic!("NVMe admin command failed: status={:?}", entry.status);
                 }
 
                 return entry;
@@ -582,7 +606,7 @@ struct RingQueueState {
 
     tail: u16,
     head: u16,
-    phase: u8,
+    phase: bool,
 }
 
 impl Default for RingQueueState {
@@ -591,7 +615,7 @@ impl Default for RingQueueState {
             size: Default::default(),
             tail: Default::default(),
             head: Default::default(),
-            phase: 1,
+            phase: true,
         }
     }
 }
@@ -644,7 +668,37 @@ pub struct CQEntry {
     pub sq_head: u16,
     pub sq_id: u16,
     pub cid: u16,
-    pub status: u16,
+    pub status: Status,
+}
+
+#[derive(Debug)]
+#[repr(transparent)]
+pub struct Status(u16);
+
+impl Status {
+    pub fn phase_tag(&self) -> bool {
+        self.0 & 1 != 0
+    }
+
+    pub fn code(&self) -> u8 {
+        ((self.0 >> 1) & 0xFF) as u8
+    }
+
+    pub fn code_type(&self) -> u8 {
+        ((self.0 >> 9) & 0x7) as u8
+    }
+
+    pub fn more(&self) -> bool {
+        self.0 & (1 << 14) != 0
+    }
+
+    pub fn do_not_retry(&self) -> bool {
+        self.0 & (1 << 15) > 0
+    }
+
+    pub fn is_success(&self) -> bool {
+        self.code_type() == 0 && self.code() == 0
+    }
 }
 
 #[derive(Clone, Copy)]
