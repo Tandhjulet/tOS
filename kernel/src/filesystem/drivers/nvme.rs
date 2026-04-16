@@ -5,7 +5,7 @@ use core::{
 };
 
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
-use log::error;
+use log::{error, info};
 use spin::Mutex;
 use x86_64::align_up;
 
@@ -245,7 +245,7 @@ impl NvmeController {
             }
         }
 
-        let queue_cnt = controller.init_queue_cnt();
+        let queue_cnt = controller.init_queue_cnt() as u32;
 
         match controller.setup_pci_interrupt_mode() {
             InterruptMode::MsiX => {
@@ -274,38 +274,86 @@ impl NvmeController {
             InterruptMode::Msi => todo!(),
             InterruptMode::Legacy => todo!(),
         }
+
+        const ENTRY_COUNT: usize = PAGE_SIZE as usize / size_of::<SQEntry>();
+        for i in 0..queue_cnt {
+            controller.create_queue_pair(ENTRY_COUNT, i + 1);
+        }
+
+        info!("success! {}", queue_cnt);
     }
 
-    // pub fn create_io_subm_queue(
-    //     &self,
-    //     max_entries: usize,
-    //     id: u32,
-    //     comp_id: u32,
-    // ) -> Queue<Submission> {
-    //     let size = max_entries * size_of::<SQEntry>();
-    //     let page_count = align_up(size as u64, PAGE_SIZE) / PAGE_SIZE;
+    pub fn create_io_subm_queue(
+        &mut self,
+        max_entries: usize,
+        id: u32,
+        comp_id: u32,
+    ) -> Queue<Submission> {
+        let size = max_entries * size_of::<SQEntry>();
+        let pages = alloc_dma_region(size as u64);
 
-    //     let pages = alloc_dma_region(size as u64);
+        let mut entry = SQEntry::default();
+        entry.prp1 = pages.phys().as_u64();
 
-    //     let entry = SQEntry::default();
-    //     entry.prp1 = pages.phys().as_u64();
+        entry.cdw10 = (id & 0xfffff) | ((max_entries as u32 - 1) << 16);
 
-    //     entry.cdw10 = (id & 0xfffff) | ((max_entries as u32 - 1) << 16);
+        const PHYS_CONTIG: u32 = 1;
+        entry.cdw11 = PHYS_CONTIG | (comp_id << 16);
 
-    //     const PHYS_CONTIG: u32 = 1;
-    //     entry.cdw11 = PHYS_CONTIG | (comp_id << 16);
+        let res = self.submit_admin_command(entry);
+        if !res.status.is_success() {
+            panic!(
+                "NVMe: Received status: {:?} whilst setting up I/O submission queue",
+                res.status
+            );
+        }
 
-    //     let cq = self.submit_admin_command(entry);
-    // }
+        let mut queue = Queue::default();
+        queue.region = Some(pages);
+        queue.state.size = max_entries as u64;
 
-    // pub fn create_io_comp_queue(&self) -> Queue<Completion> {}
+        queue
+    }
 
-    // pub fn create_io_queue(&self) -> QueuePair {
-    //     let subm = self.create_io_subm_queue();
-    //     let comp = self.create_io_comp_queue();
+    pub fn create_io_comp_queue(
+        &mut self,
+        max_entries: usize,
+        id: u32,
+        vec: u32,
+    ) -> Queue<Completion> {
+        let size = max_entries * size_of::<SQEntry>();
+        let pages = alloc_dma_region(size as u64);
 
-    //     QueuePair { subm: (), comp: () }
-    // }
+        let mut entry = SQEntry::default();
+        entry.prp1 = pages.phys().as_u64();
+        entry.cdw10 = (id & 0xfffff) | ((max_entries as u32 - 1) << 16);
+
+        const COMPQUEUE_ENABLED: u32 = 0x2;
+        const PHYS_CONTIG: u32 = 0x1;
+        entry.cdw11 = PHYS_CONTIG | COMPQUEUE_ENABLED | (vec << 16);
+
+        let res = self.submit_admin_command(entry);
+
+        if !res.status.is_success() {
+            panic!(
+                "NVMe: Received status: {:?} whilst setting up I/O completion queue",
+                res.status
+            );
+        }
+
+        let mut queue = Queue::default();
+        queue.region = Some(pages);
+        queue.state.size = max_entries as u64;
+
+        queue
+    }
+
+    pub fn create_queue_pair(&mut self, entry_count: usize, id: u32) -> QueuePair {
+        let comp = self.create_io_comp_queue(entry_count, id, id);
+        let subm = self.create_io_subm_queue(entry_count, id, id);
+
+        QueuePair { subm, comp }
+    }
 
     fn init_queue_cnt(&mut self) -> u16 {
         let io_queue_count_raw = self.set_features(cfg::op::features::FID_NUM_QUEUES, |cmd| {
@@ -591,12 +639,12 @@ impl ControllerCap {
     }
 }
 
-trait QueueKind {}
+pub trait QueueKind {}
 
 #[derive(Default)]
-struct Submission;
+pub struct Submission;
 #[derive(Default)]
-struct Completion;
+pub struct Completion;
 
 impl QueueKind for Submission {}
 impl QueueKind for Completion {}
@@ -620,13 +668,13 @@ impl Default for RingQueueState {
     }
 }
 
-struct QueuePair {
+pub struct QueuePair {
     subm: Queue<Submission>,
     comp: Queue<Completion>,
 }
 
 #[derive(Default)]
-struct Queue<K: QueueKind> {
+pub struct Queue<K: QueueKind> {
     region: Option<MappedRegion>,
     state: RingQueueState,
     _phantom: PhantomData<K>,
