@@ -43,6 +43,10 @@ pub mod cfg {
         pub const IDENTIFY: u32 = 0x06;
         pub const SET_FEATURES: u32 = 0x09;
         pub const GET_FEATURES: u32 = 0x0A;
+        pub const DEL_SUBQ: u32 = 0x0;
+        pub const CRT_SUBQ: u32 = 0x01;
+        pub const DEL_CMPQ: u32 = 0x04;
+        pub const CRT_CMPQ: u32 = 0x05;
 
         // For a list of Identify CNS values and reference sections, view figure 273
         pub mod identify {
@@ -321,18 +325,25 @@ impl NvmeController {
         id: u32,
         vec: u32,
     ) -> Queue<Completion> {
-        let size = max_entries * size_of::<SQEntry>();
+        let size = max_entries * size_of::<CQEntry>();
         let pages = alloc_dma_region(size as u64);
 
         let mut entry = SQEntry::default();
+        entry.cdw0 = cfg::op::CRT_CMPQ | (1 << 16);
         entry.prp1 = pages.phys().as_u64();
         entry.cdw10 = (id & 0xfffff) | ((max_entries as u32 - 1) << 16);
 
+        println!("vec: {vec}");
+
         const COMPQUEUE_ENABLED: u32 = 0x2;
         const PHYS_CONTIG: u32 = 0x1;
-        entry.cdw11 = PHYS_CONTIG | COMPQUEUE_ENABLED | (vec << 16);
+        entry.cdw11 = PHYS_CONTIG;
+
+        info!("1");
 
         let res = self.submit_admin_command(entry);
+
+        info!("2");
 
         if !res.status.is_success() {
             panic!(
@@ -350,6 +361,9 @@ impl NvmeController {
 
     pub fn create_queue_pair(&mut self, entry_count: usize, id: u32) -> QueuePair {
         let comp = self.create_io_comp_queue(entry_count, id, id);
+
+        info!("Test");
+
         let subm = self.create_io_subm_queue(entry_count, id, id);
 
         QueuePair { subm, comp }
@@ -479,8 +493,11 @@ impl NvmeController {
             write_volatile(slot as *mut SQEntry, cmd);
         };
 
-        sq.state.tail = (sq.state.tail + 1) % (sq.state.size as u16 + 1);
+        sq.state.tail = (sq.state.tail + 1) % sq.state.size as u16;
         let tail = sq.state.tail;
+
+        info!("slot: {slot}, state: {:?}", sq.state);
+
         let doorbell = self.sq_doorbell(0);
         unsafe {
             self.write_reg(doorbell, tail as u32);
@@ -498,9 +515,9 @@ impl NvmeController {
                 (slot, cq.state.phase)
             };
 
-            // info!("phase: {}", phase);
-
             let entry = unsafe { read_volatile(slot as *const CQEntry) };
+
+            // info!("phase: {}, status: {:#b}", phase, entry.status.0);
 
             if entry.status.phase_tag() == phase {
                 let doorbell = self.cq_doorbell(0);
@@ -649,6 +666,7 @@ pub struct Completion;
 impl QueueKind for Submission {}
 impl QueueKind for Completion {}
 
+#[derive(Debug)]
 struct RingQueueState {
     size: u64,
 
