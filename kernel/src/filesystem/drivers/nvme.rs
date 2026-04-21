@@ -6,12 +6,11 @@ use core::{
 };
 
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
-use log::{error, info};
+use log::error;
 use spin::Mutex;
-use x86_64::{align_up, registers::control};
 
 use crate::{
-    allocator::mmio::{MappedRegion, PAGE_SIZE, alloc_dma_region, map_mmio},
+    allocator::mmio::{MappedRegion, PAGE_SIZE, alloc_dma_region},
     filesystem::drivers::StorageDevice,
     io::pci::{PciDevice, bar::Bar},
     println,
@@ -141,125 +140,108 @@ impl NvmeController {
     }
 
     fn init(this: &Arc<Mutex<Self>>) {
-        let mut controller = this.lock();
-        controller.reset_and_disable();
-        let mut cfg = controller.configure();
+        let queue_cnt = {
+            let mut controller = this.lock();
+            controller.reset_and_disable();
+            let mut cfg = controller.configure();
+            controller.enable(&mut cfg);
+            controller.run_identify_seq(&mut cfg);
+            controller.init_queue_cnt() as u32
+        };
 
-        cfg.set_enabled(true);
-        unsafe { controller.write_reg(cfg::CC, cfg.raw()) };
+        this.lock().setup_interrupts(this, queue_cnt);
+        this.lock().create_io_queues(queue_cnt);
+    }
 
-        // wait for controller to enable
-        while (unsafe { controller.read_reg(cfg::CSTS) } & 0x1) == 0 {}
+    fn create_io_queues(&mut self, queue_cnt: u32) {
+        let slots_needed = queue_cnt as usize - self.queues.len();
+        self.queues.reserve_exact(slots_needed);
 
-        let identify_ctrlr = controller
-            .identify_read::<IdentifyController>(cfg::op::identify::CNS_CONTROLLER, |_| {});
-        controller.identify_ctlr = Some(identify_ctrlr);
+        const ENTRY_COUNT: usize = PAGE_SIZE as usize / size_of::<SQEntry>();
+        for i in 0..queue_cnt as u16 {
+            let pair = self.create_queue_pair(ENTRY_COUNT, i + 1);
+            self.queues.push(pair);
+        }
+    }
+
+    fn run_identify_seq(&mut self, cfg: &mut ControllerConfig) {
+        let identify_ctrlr =
+            self.identify_read::<IdentifyController>(cfg::op::identify::CNS_CONTROLLER, |_| {});
+        self.identify_ctlr = Some(identify_ctrlr);
 
         if cfg.css() == 0 {
             // TODO
         }
-        if controller.cap.css_some() {
-            let cmd_set = controller
-                .identify_read::<IdentifyCommandSet>(cfg::op::identify::CNS_CMD_SET, |_| {});
-            let selected_cmd_idx = cmd_set.first_valid().unwrap();
+        if self.cap.css_some() {
+            self.enumerate_namespaces();
+        }
+    }
 
-            // Refer to section 5.27.1.21 for documentation regarding
-            // I/O Command Set Profile (FID: 0x19)
-            controller.set_features(cfg::op::features::FID_SET_PROFILE, |features| {
-                features.cdw11 = selected_cmd_idx as u32;
-            });
+    fn enumerate_namespaces(&mut self) {
+        let cmd_set =
+            self.identify_read::<IdentifyCommandSet>(cfg::op::identify::CNS_CMD_SET, |_| {});
+        let selected_cmd_idx = cmd_set.first_valid().unwrap();
 
-            for csi in cmd_set.csi_iter(selected_cmd_idx) {
-                let nsids = controller.identify_read::<IdentifyNamespaceList>(
-                    cfg::op::identify::CNS_ACTIVE_NS_CMD_SET,
-                    |identify| {
-                        identify.nsid = 0;
+        // Refer to section 5.27.1.21 for documentation regarding
+        // I/O Command Set Profile (FID: 0x19)
+        self.set_features(cfg::op::features::FID_SET_PROFILE, |features| {
+            features.cdw11 = selected_cmd_idx as u32;
+        });
 
-                        // See figure 271
-                        identify.cdw11 = (csi as u32) << 24;
-                    },
-                );
+        for csi in cmd_set.csi_iter(selected_cmd_idx) {
+            let nsids = self.identify_read::<IdentifyNamespaceList>(
+                cfg::op::identify::CNS_ACTIVE_NS_CMD_SET,
+                |identify| {
+                    identify.nsid = 0;
 
-                for &nsid in nsids.valid() {
-                    let nvm_base = if Self::is_csi_nvm_based(csi) {
-                        let ns_nvm = controller.identify_read::<IdentifyNamespaceNvm>(
-                            cfg::op::identify::CNS_NAMESPACE,
-                            |cmd| {
-                                cmd.nsid = nsid;
-                            },
-                        );
+                    // See figure 271
+                    identify.cdw11 = (csi as u32) << 24;
+                },
+            );
 
-                        Some(ns_nvm)
-                    } else {
-                        None
-                    };
-
-                    // TODO: store this; it's CSI-dependent and contains specific meta
-                    controller.identify(cfg::op::identify::CNS_SPECIFIC_NS, |cmd| {
-                        cmd.nsid = nsid;
-                        cmd.cdw11 = (csi as u32) << 24;
-                    });
-
-                    controller.identify(cfg::op::identify::CNS_SPECIFIC_CTRLR, |cmd| {
-                        cmd.cdw11 = (csi as u32) << 24;
-                    });
-
-                    let independent = controller.identify_read::<IdentifyNamespaceIndependent>(
-                        cfg::op::identify::CNS_NAMESPACE_INDEPENDENT,
-                        |cmd| {
-                            cmd.nsid = nsid;
-                        },
-                    );
-
-                    controller.namespaces.push(NvmeNamespace {
-                        nsid,
-                        csi,
-                        nvm_base,
-                        independent,
-                    });
-                }
+            for &nsid in nsids.valid() {
+                let namespace = self.build_namespace(nsid, csi);
+                self.namespaces.push(namespace);
             }
         }
+    }
 
-        let queue_cnt = controller.init_queue_cnt() as u32;
+    fn build_namespace(&mut self, nsid: u32, csi: u8) -> NvmeNamespace {
+        let nvm_base = if Self::is_csi_nvm_based(csi) {
+            let ns_nvm = self.identify_read::<IdentifyNamespaceNvm>(
+                cfg::op::identify::CNS_NAMESPACE,
+                |cmd| {
+                    cmd.nsid = nsid;
+                },
+            );
 
-        match controller.setup_pci_interrupt_mode() {
-            InterruptMode::MsiX => {
-                let lock = controller.device.lock();
-                let mut map = lock
-                    .get_msix_tables()
-                    .expect("MSI-X tables should be present as MSI-X is enabled");
+            Some(ns_nvm)
+        } else {
+            None
+        };
 
-                let cpu_id = match &*INTERRUPT_CONTROLLER.get() {
-                    InterruptControllerType::Apic(apic_info) => apic_info.lapic.id(),
-                    _ => panic!("Using MSI-X, the interrupt controller should always be APIC!"),
-                };
+        // TODO: store CSI-specific meta
+        self.identify(cfg::op::identify::CNS_SPECIFIC_NS, |cmd| {
+            cmd.nsid = nsid;
+            cmd.cdw11 = (csi as u32) << 24;
+        });
 
-                for i in 0..queue_cnt as usize {
-                    let weak = Arc::downgrade(&this);
-                    let vector = interrupts::allocate_interrupt(Box::new(move || {
-                        if let Some(ctrlr) = weak.upgrade() {
-                            ctrlr.lock().nvme_int_handler()
-                        } else {
-                            IrqResult::EoiNeeded
-                        }
-                    }))
-                    .expect("should be available interrupt vectors");
+        self.identify(cfg::op::identify::CNS_SPECIFIC_CTRLR, |cmd| {
+            cmd.cdw11 = (csi as u32) << 24;
+        });
 
-                    map[i + 1].init(cpu_id, vector as u32);
-                }
-            }
-            InterruptMode::Msi => todo!(),
-            InterruptMode::Legacy => todo!(),
-        }
+        let independent = self.identify_read::<IdentifyNamespaceIndependent>(
+            cfg::op::identify::CNS_NAMESPACE_INDEPENDENT,
+            |cmd| {
+                cmd.nsid = nsid;
+            },
+        );
 
-        let slots_needed = queue_cnt as usize - controller.queues.len();
-        controller.queues.reserve_exact(slots_needed);
-
-        const ENTRY_COUNT: usize = PAGE_SIZE as usize / size_of::<SQEntry>();
-        for i in 0..queue_cnt as u16 {
-            let pair = controller.create_queue_pair(ENTRY_COUNT, i + 1);
-            controller.queues.push(pair);
+        NvmeNamespace {
+            nsid,
+            csi,
+            nvm_base,
+            independent,
         }
     }
 
@@ -302,6 +284,14 @@ impl NvmeController {
         } else {
             0b000
         }
+    }
+
+    fn enable(&mut self, cfg: &mut ControllerConfig) {
+        cfg.set_enabled(true);
+        unsafe { self.write_reg(cfg::CC, cfg.raw()) };
+
+        // wait for controller to enable
+        while (unsafe { self.read_reg(cfg::CSTS) } & 0x1) == 0 {}
     }
 
     pub fn create_io_subm_queue(
@@ -395,6 +385,40 @@ impl NvmeController {
     pub fn nvme_int_handler(&self) -> IrqResult {
         println!("IRQ!");
         IrqResult::EoiNeeded
+    }
+
+    fn setup_interrupts(&mut self, self_ref: &Arc<Mutex<Self>>, queue_cnt: u32) {
+        match self.setup_pci_interrupt_mode() {
+            InterruptMode::MsiX => self.setup_msix_interrupts(self_ref, queue_cnt),
+            InterruptMode::Msi => todo!(),
+            InterruptMode::Legacy => todo!(),
+        }
+    }
+
+    fn setup_msix_interrupts(&self, self_ref: &Arc<Mutex<Self>>, queue_cnt: u32) {
+        let cpu_id = match &*INTERRUPT_CONTROLLER.get() {
+            InterruptControllerType::Apic(apic_info) => apic_info.lapic.id(),
+            _ => panic!("Using MSI-X, the interrupt controller should always be APIC!"),
+        };
+
+        let lock = self.device.lock();
+        let mut map = lock
+            .get_msix_tables()
+            .expect("MSI-X tables should be present as MSI-X is enabled");
+
+        for i in 0..queue_cnt as usize {
+            let weak = Arc::downgrade(&self_ref);
+            let vector = interrupts::allocate_interrupt(Box::new(move || {
+                if let Some(ctrlr) = weak.upgrade() {
+                    ctrlr.lock().nvme_int_handler()
+                } else {
+                    IrqResult::EoiNeeded
+                }
+            }))
+            .expect("should be available interrupt vectors");
+
+            map[i + 1].init(cpu_id, vector as u32);
+        }
     }
 
     pub fn setup_pci_interrupt_mode(&self) -> InterruptMode {
@@ -590,7 +614,7 @@ impl ControllerConfig {
         self
     }
 
-    pub fn css(&mut self) -> u8 {
+    pub fn css(&self) -> u8 {
         ((self.0 >> 4) & 0x7) as u8
     }
 
