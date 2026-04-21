@@ -5,7 +5,7 @@ use core::{
     ptr::{read_volatile, write_volatile},
 };
 
-use alloc::{boxed::Box, sync::Arc, vec::Vec};
+use alloc::{boxed::Box, string::String, sync::Arc, vec::Vec};
 use log::error;
 use spin::Mutex;
 
@@ -931,11 +931,17 @@ pub struct IdentifyNamespaceIndependent {
 }
 
 impl StorageDevice for NvmeController {
-    fn read() {
+    type Error = String;
+
+    fn read_blocks(&mut self, lba: u64, count: u64, buf: &mut [u8]) -> Result<(), Self::Error> {
         todo!()
     }
 
-    fn write() {
+    fn write_blocks(&mut self, lba: u64, count: u64, buf: &[u8]) -> Result<(), Self::Error> {
+        todo!()
+    }
+
+    fn flush(&mut self) -> Result<(), Self::Error> {
         todo!()
     }
 }

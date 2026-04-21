@@ -5,8 +5,6 @@ use crate::{filesystem::drivers::nvme::NvmeController, io::pci::PciDevice};
 
 pub mod drivers;
 
-struct Ext2FileSystem {}
-
 pub fn init() {
     let devices = {
         let mut devices = crate::io::pci::DEVICES.lock();
