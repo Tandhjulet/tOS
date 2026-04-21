@@ -1,5 +1,6 @@
 use core::{
     cmp::min,
+    fmt::Display,
     marker::PhantomData,
     ptr::{read_volatile, write_volatile},
 };
@@ -7,7 +8,7 @@ use core::{
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use log::{error, info};
 use spin::Mutex;
-use x86_64::align_up;
+use x86_64::{align_up, registers::control};
 
 use crate::{
     allocator::mmio::{MappedRegion, PAGE_SIZE, alloc_dma_region, map_mmio},
@@ -62,6 +63,7 @@ pub mod cfg {
         pub mod features {
             pub const FID_NUM_QUEUES: u32 = 0x07;
             pub const FID_SET_PROFILE: u32 = 0x19;
+            pub const FID_INT_VEC_CONF: u32 = 0x09;
         }
     }
 }
@@ -87,7 +89,7 @@ pub struct NvmeController {
     adm_queue: Option<QueuePair>,
     adm_buf: MappedRegion,
 
-    io_queue: Vec<QueuePair>,
+    queues: Vec<QueuePair>,
 
     namespaces: Vec<NvmeNamespace>,
 }
@@ -110,7 +112,7 @@ impl NvmeController {
                 cap,
                 identify_ctlr: None,
                 adm_queue: None,
-                io_queue: Vec::new(),
+                queues: Vec::new(),
                 adm_buf: alloc_dma_region(PAGE_SIZE),
                 namespaces: Vec::new(),
             }
@@ -281,35 +283,40 @@ impl NvmeController {
             InterruptMode::Legacy => todo!(),
         }
 
-        const ENTRY_COUNT: usize = PAGE_SIZE as usize / size_of::<SQEntry>();
-        for i in 0..queue_cnt {
-            controller.create_queue_pair(ENTRY_COUNT, i + 1);
-        }
+        let slots_needed = queue_cnt as usize - controller.queues.len();
+        controller.queues.reserve_exact(slots_needed);
 
-        info!("success! {}", queue_cnt);
+        const ENTRY_COUNT: usize = PAGE_SIZE as usize / size_of::<SQEntry>();
+        for i in 0..queue_cnt as u16 {
+            let pair = controller.create_queue_pair(ENTRY_COUNT, i + 1);
+            controller.queues.push(pair);
+        }
     }
 
     pub fn create_io_subm_queue(
         &mut self,
         max_entries: usize,
-        id: u32,
-        comp_id: u32,
+        id: u16,
+        comp_id: u16,
     ) -> Queue<Submission> {
         let size = max_entries * size_of::<SQEntry>();
         let pages = alloc_dma_region(size as u64);
 
         let mut entry = SQEntry::default();
+        entry.cdw0 = cfg::op::CRT_SUBQ | (1 << 16);
         entry.prp1 = pages.phys().as_u64();
 
-        entry.cdw10 = (id & 0xfffff) | ((max_entries as u32 - 1) << 16);
+        entry.cdw10 = (id as u32) | ((max_entries as u32 - 1) << 16);
 
         const PHYS_CONTIG: u32 = 1;
-        entry.cdw11 = PHYS_CONTIG | (comp_id << 16);
+        entry.cdw11 = PHYS_CONTIG | ((comp_id as u32) << 16);
+
+        println!("id: {id}, comp_id: {comp_id}");
 
         let res = self.submit_admin_command(entry);
         if !res.status.is_success() {
             panic!(
-                "NVMe: Received status: {:?} whilst setting up I/O submission queue",
+                "NVMe: Received status: {} whilst setting up I/O submission queue",
                 res.status
             );
         }
@@ -324,7 +331,7 @@ impl NvmeController {
     pub fn create_io_comp_queue(
         &mut self,
         max_entries: usize,
-        id: u32,
+        id: u16,
         vec: u32,
     ) -> Queue<Completion> {
         let size = max_entries * size_of::<CQEntry>();
@@ -333,7 +340,7 @@ impl NvmeController {
         let mut entry = SQEntry::default();
         entry.cdw0 = cfg::op::CRT_CMPQ | (1 << 16);
         entry.prp1 = pages.phys().as_u64();
-        entry.cdw10 = (id & 0xfffff) | ((max_entries as u32 - 1) << 16);
+        entry.cdw10 = (id as u32) | ((max_entries as u32 - 1) << 16);
 
         const COMPQUEUE_ENABLED: u32 = 0x2;
         const PHYS_CONTIG: u32 = 0x1;
@@ -343,7 +350,7 @@ impl NvmeController {
 
         if !res.status.is_success() {
             panic!(
-                "NVMe: Received status: {:?} whilst setting up I/O completion queue",
+                "NVMe: Received status: {} whilst setting up I/O completion queue",
                 res.status
             );
         }
@@ -351,12 +358,13 @@ impl NvmeController {
         let mut queue = Queue::default();
         queue.region = Some(pages);
         queue.state.size = max_entries as u64;
+        queue.id = id;
 
         queue
     }
 
-    pub fn create_queue_pair(&mut self, entry_count: usize, id: u32) -> QueuePair {
-        let comp = self.create_io_comp_queue(entry_count, id, id);
+    pub fn create_queue_pair(&mut self, entry_count: usize, id: u16) -> QueuePair {
+        let comp = self.create_io_comp_queue(entry_count, id, id as u32);
         let subm = self.create_io_subm_queue(entry_count, id, id);
 
         QueuePair { subm, comp }
@@ -364,13 +372,13 @@ impl NvmeController {
 
     fn init_queue_cnt(&mut self) -> u16 {
         let io_queue_count_raw = self.set_features(cfg::op::features::FID_NUM_QUEUES, |cmd| {
-            cmd.cdw11 = ((cfg::IO_QUEUES as u32) << 16) | cfg::IO_QUEUES as u32;
+            cmd.cdw11 = ((cfg::IO_QUEUES as u32 - 1) << 16) | (cfg::IO_QUEUES as u32 - 1);
         });
 
-        let io_comp_queues = (io_queue_count_raw.dw0 >> 16) as u16;
-        let io_subm_queues = io_queue_count_raw.dw0 as u16;
+        let io_comp_queues = (io_queue_count_raw.dw0 >> 16) as u16 + 1;
+        let io_subm_queues = io_queue_count_raw.dw0 as u16 + 1;
 
-        min(io_comp_queues, io_subm_queues)
+        min(io_comp_queues, io_subm_queues).min(cfg::IO_QUEUES)
     }
 
     pub fn nvme_int_handler(&self) -> IrqResult {
@@ -528,10 +536,6 @@ impl NvmeController {
                 };
 
                 unsafe { self.write_reg(doorbell, new_head as u32) };
-
-                if !entry.status.is_success() {
-                    panic!("NVMe admin command failed: status={:?}", entry.status);
-                }
 
                 return entry;
             }
@@ -733,7 +737,6 @@ pub struct CQEntry {
     pub status: Status,
 }
 
-#[derive(Debug)]
 #[repr(transparent)]
 pub struct Status(u16);
 
@@ -760,6 +763,19 @@ impl Status {
 
     pub fn is_success(&self) -> bool {
         self.code_type() == 0 && self.code() == 0
+    }
+}
+
+impl Display for Status {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "0b{:016b} (type={}, code={}, success={})",
+            self.0,
+            self.code_type(),
+            self.code(),
+            self.is_success()
+        )
     }
 }
 
