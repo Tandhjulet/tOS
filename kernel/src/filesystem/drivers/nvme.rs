@@ -251,43 +251,35 @@ impl NvmeController {
 
         let queue_cnt = controller.init_queue_cnt() as u32;
 
-        let cc = unsafe { controller.read_reg(cfg::CC) };
-        let csts = unsafe { controller.read_reg(cfg::CSTS) };
-        info!("CC={:#010x} CSTS={:#010x}", cc, csts);
+        match controller.setup_pci_interrupt_mode() {
+            InterruptMode::MsiX => {
+                let lock = controller.device.lock();
+                let mut map = lock
+                    .get_msix_tables()
+                    .expect("MSI-X tables should be present as MSI-X is enabled");
 
-        // match controller.setup_pci_interrupt_mode() {
-        //     InterruptMode::MsiX => {
-        //         let lock = controller.device.lock();
-        //         let mut map = lock
-        //             .get_msix_tables()
-        //             .expect("MSI-X tables should be present as MSI-X is enabled");
+                let cpu_id = match &*INTERRUPT_CONTROLLER.get() {
+                    InterruptControllerType::Apic(apic_info) => apic_info.lapic.id(),
+                    _ => panic!("Using MSI-X, the interrupt controller should always be APIC!"),
+                };
 
-        //         let cpu_id = match &*INTERRUPT_CONTROLLER.get() {
-        //             InterruptControllerType::Apic(apic_info) => apic_info.lapic.id(),
-        //             _ => panic!("Using MSI-X, the interrupt controller should always be APIC!"),
-        //         };
+                for i in 0..queue_cnt as usize {
+                    let weak = Arc::downgrade(&this);
+                    let vector = interrupts::allocate_interrupt(Box::new(move || {
+                        if let Some(ctrlr) = weak.upgrade() {
+                            ctrlr.lock().nvme_int_handler()
+                        } else {
+                            IrqResult::EoiNeeded
+                        }
+                    }))
+                    .expect("should be available interrupt vectors");
 
-        //         for i in 0..queue_cnt as usize {
-        //             let weak = Arc::downgrade(&this);
-        //             let vector = interrupts::allocate_interrupt(Box::new(move || {
-        //                 if let Some(ctrlr) = weak.upgrade() {
-        //                     ctrlr.lock().nvme_int_handler()
-        //                 } else {
-        //                     IrqResult::EoiNeeded
-        //                 }
-        //             }))
-        //             .expect("should be available interrupt vectors");
-
-        //             map[i + 1].init(cpu_id, vector as u32);
-        //         }
-        //     }
-        //     InterruptMode::Msi => todo!(),
-        //     InterruptMode::Legacy => todo!(),
-        // }
-
-        let cc = unsafe { controller.read_reg(cfg::CC) };
-        let csts = unsafe { controller.read_reg(cfg::CSTS) };
-        info!("CC={:#010x} CSTS={:#010x}", cc, csts);
+                    map[i + 1].init(cpu_id, vector as u32);
+                }
+            }
+            InterruptMode::Msi => todo!(),
+            InterruptMode::Legacy => todo!(),
+        }
 
         const ENTRY_COUNT: usize = PAGE_SIZE as usize / size_of::<SQEntry>();
         for i in 0..queue_cnt {
@@ -389,6 +381,7 @@ impl NvmeController {
     pub fn setup_pci_interrupt_mode(&self) -> InterruptMode {
         let mut interrupt_mode: Option<InterruptMode> = None;
         let supported_interrupts = self.device.lock().interrupt_support();
+
         if supported_interrupts.msix {
             match self.device.lock().enable_msix() {
                 Ok(_) => interrupt_mode = Some(InterruptMode::MsiX),
