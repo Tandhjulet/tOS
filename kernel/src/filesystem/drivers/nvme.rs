@@ -251,33 +251,43 @@ impl NvmeController {
 
         let queue_cnt = controller.init_queue_cnt() as u32;
 
-        match controller.setup_pci_interrupt_mode() {
-            InterruptMode::MsiX => {
-                let lock = controller.device.lock();
-                let mut map = lock
-                    .get_msix_tables()
-                    .expect("MSI-X tables should be present as MSI-X is enabled");
+        let cc = unsafe { controller.read_reg(cfg::CC) };
+        let csts = unsafe { controller.read_reg(cfg::CSTS) };
+        info!("CC={:#010x} CSTS={:#010x}", cc, csts);
 
-                let cpu_id = match &*INTERRUPT_CONTROLLER.get() {
-                    InterruptControllerType::Apic(apic_info) => apic_info.lapic.id(),
-                    _ => panic!("Using MSI-X, the interrupt controller should always be APIC!"),
-                };
+        // match controller.setup_pci_interrupt_mode() {
+        //     InterruptMode::MsiX => {
+        //         let lock = controller.device.lock();
+        //         let mut map = lock
+        //             .get_msix_tables()
+        //             .expect("MSI-X tables should be present as MSI-X is enabled");
 
-                let weak = Arc::downgrade(&this);
-                let admin_vector = interrupts::allocate_interrupt(Box::new(move || {
-                    if let Some(ctrlr) = weak.upgrade() {
-                        ctrlr.lock().nvme_int_handler()
-                    } else {
-                        IrqResult::EoiNeeded
-                    }
-                }))
-                .expect("should be available interrupt vectors");
+        //         let cpu_id = match &*INTERRUPT_CONTROLLER.get() {
+        //             InterruptControllerType::Apic(apic_info) => apic_info.lapic.id(),
+        //             _ => panic!("Using MSI-X, the interrupt controller should always be APIC!"),
+        //         };
 
-                map[0].init(cpu_id, admin_vector as u32);
-            }
-            InterruptMode::Msi => todo!(),
-            InterruptMode::Legacy => todo!(),
-        }
+        //         for i in 0..queue_cnt as usize {
+        //             let weak = Arc::downgrade(&this);
+        //             let vector = interrupts::allocate_interrupt(Box::new(move || {
+        //                 if let Some(ctrlr) = weak.upgrade() {
+        //                     ctrlr.lock().nvme_int_handler()
+        //                 } else {
+        //                     IrqResult::EoiNeeded
+        //                 }
+        //             }))
+        //             .expect("should be available interrupt vectors");
+
+        //             map[i + 1].init(cpu_id, vector as u32);
+        //         }
+        //     }
+        //     InterruptMode::Msi => todo!(),
+        //     InterruptMode::Legacy => todo!(),
+        // }
+
+        let cc = unsafe { controller.read_reg(cfg::CC) };
+        let csts = unsafe { controller.read_reg(cfg::CSTS) };
+        info!("CC={:#010x} CSTS={:#010x}", cc, csts);
 
         const ENTRY_COUNT: usize = PAGE_SIZE as usize / size_of::<SQEntry>();
         for i in 0..queue_cnt {
@@ -333,17 +343,11 @@ impl NvmeController {
         entry.prp1 = pages.phys().as_u64();
         entry.cdw10 = (id & 0xfffff) | ((max_entries as u32 - 1) << 16);
 
-        println!("vec: {vec}");
-
         const COMPQUEUE_ENABLED: u32 = 0x2;
         const PHYS_CONTIG: u32 = 0x1;
-        entry.cdw11 = PHYS_CONTIG;
-
-        info!("1");
+        entry.cdw11 = PHYS_CONTIG | COMPQUEUE_ENABLED | (vec << 16);
 
         let res = self.submit_admin_command(entry);
-
-        info!("2");
 
         if !res.status.is_success() {
             panic!(
@@ -361,9 +365,6 @@ impl NvmeController {
 
     pub fn create_queue_pair(&mut self, entry_count: usize, id: u32) -> QueuePair {
         let comp = self.create_io_comp_queue(entry_count, id, id);
-
-        info!("Test");
-
         let subm = self.create_io_subm_queue(entry_count, id, id);
 
         QueuePair { subm, comp }
@@ -471,6 +472,10 @@ impl NvmeController {
         asq.state.size = 63;
         acq.state.size = 63;
 
+        // admin queues have id 0
+        asq.id = 0;
+        acq.id = 0;
+
         let aqa = ((acq.state.size as u32) << 16) | (asq.state.size as u32);
         unsafe { bar.write32(cfg::AQA, aqa) };
 
@@ -487,6 +492,7 @@ impl NvmeController {
 
     fn submit_admin_command(&mut self, cmd: SQEntry) -> CQEntry {
         let sq = &mut self.adm_queue.as_mut().unwrap().subm;
+        let sq_id = sq.id;
 
         let slot = sq.virt().unwrap() + (sq.state.tail as u64 * size_of::<SQEntry>() as u64);
         unsafe {
@@ -496,9 +502,7 @@ impl NvmeController {
         sq.state.tail = (sq.state.tail + 1) % sq.state.size as u16;
         let tail = sq.state.tail;
 
-        info!("slot: {slot}, state: {:?}", sq.state);
-
-        let doorbell = self.sq_doorbell(0);
+        let doorbell = self.sq_doorbell(sq_id);
         unsafe {
             self.write_reg(doorbell, tail as u32);
         };
@@ -516,8 +520,6 @@ impl NvmeController {
             };
 
             let entry = unsafe { read_volatile(slot as *const CQEntry) };
-
-            // info!("phase: {}, status: {:#b}", phase, entry.status.0);
 
             if entry.status.phase_tag() == phase {
                 let doorbell = self.cq_doorbell(0);
@@ -693,6 +695,7 @@ pub struct QueuePair {
 
 #[derive(Default)]
 pub struct Queue<K: QueueKind> {
+    id: u16,
     region: Option<MappedRegion>,
     state: RingQueueState,
     _phantom: PhantomData<K>,
