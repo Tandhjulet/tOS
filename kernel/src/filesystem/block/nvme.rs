@@ -11,7 +11,7 @@ use spin::Mutex;
 
 use crate::{
     allocator::mmio::{MappedRegion, PAGE_SIZE, alloc_dma_region},
-    filesystem::drivers::StorageDevice,
+    filesystem::block::StorageDevice,
     io::pci::{PciDevice, bar::Bar},
     println,
     sys::interrupts::{

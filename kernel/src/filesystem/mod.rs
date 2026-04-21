@@ -1,9 +1,9 @@
 use alloc::{sync::Arc, vec::Vec};
 use spin::Mutex;
 
-use crate::{filesystem::drivers::nvme::NvmeController, io::pci::PciDevice};
+use crate::{filesystem::block::nvme::NvmeController, io::pci::PciDevice};
 
-pub mod drivers;
+pub mod block;
 
 pub fn init() {
     let devices = {
