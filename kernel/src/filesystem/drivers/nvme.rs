@@ -142,38 +142,8 @@ impl NvmeController {
 
     fn init(this: &Arc<Mutex<Self>>) {
         let mut controller = this.lock();
-
-        let mut cfg = controller.get_configuration();
-        cfg.set_enabled(false);
-        unsafe { controller.write_reg(cfg::CC, cfg.raw()) };
-
-        // wait for controller to disable
-        while (unsafe { controller.read_reg(cfg::CSTS) } & 0x1) == 1 {}
-
-        let admin_queues = controller.create_admin_queues();
-        controller.adm_queue = Some(admin_queues);
-
-        let mut cfg = controller.get_configuration();
-
-        // MPS is defined as page_size = (2 ^ (12 + MPS))
-        // since page_size = 4096 => MPS = 0
-        let mps = 0;
-
-        let mut css = 0b000u8;
-        if controller.cap.css_none() {
-            css = 0b111;
-        } else if controller.cap.css_some() {
-            css = 0b110;
-        }
-
-        cfg.set_css(css)
-            .set_ams(AmsType::RoundRobin)
-            .set_mps(mps)
-            .set_enabled(false)
-            .set_iocqes(4) // Comp entry size: 2^4 = 16 bytes
-            .set_iosqes(6); // Subm entry size: 2^6 = 64 bytes
-
-        unsafe { controller.write_reg(cfg::CC, cfg.raw()) };
+        controller.reset_and_disable();
+        let mut cfg = controller.configure();
 
         cfg.set_enabled(true);
         unsafe { controller.write_reg(cfg::CC, cfg.raw()) };
@@ -290,6 +260,47 @@ impl NvmeController {
         for i in 0..queue_cnt as u16 {
             let pair = controller.create_queue_pair(ENTRY_COUNT, i + 1);
             controller.queues.push(pair);
+        }
+    }
+
+    fn reset_and_disable(&mut self) {
+        let mut cfg = self.get_configuration();
+        cfg.set_enabled(false);
+        unsafe { self.write_reg(cfg::CC, cfg.raw()) };
+
+        // wait for controller to disable
+        while (unsafe { self.read_reg(cfg::CSTS) } & 0x1) == 1 {}
+
+        let admin_queues = self.create_admin_queues();
+        self.adm_queue = Some(admin_queues);
+    }
+
+    fn configure(&mut self) -> ControllerConfig {
+        // MPS: page_size = (2 ^ (12 + MPS)), so 4096-byte pages => MPS = 0
+        let mps = 0;
+        let css = self.select_command_set_selector();
+
+        let mut cfg = self.get_configuration();
+
+        cfg.set_css(css)
+            .set_ams(AmsType::RoundRobin)
+            .set_mps(mps)
+            .set_enabled(false)
+            .set_iocqes(4) // Comp entry size: 2^4 = 16 bytes
+            .set_iosqes(6); // Subm entry size: 2^6 = 64 bytes
+
+        unsafe { self.write_reg(cfg::CC, cfg.raw()) };
+
+        cfg
+    }
+
+    fn select_command_set_selector(&self) -> u8 {
+        if self.cap.css_none() {
+            0b111
+        } else if self.cap.css_some() {
+            0b110
+        } else {
+            0b000
         }
     }
 
