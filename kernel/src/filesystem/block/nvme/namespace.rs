@@ -1,27 +1,14 @@
-use alloc::string::String;
+use alloc::{string::String, sync::Arc};
 
-use crate::filesystem::block::StorageDevice;
+use crate::filesystem::block::{StorageDevice, nvme::NvmeController};
 
 pub struct NvmeNamespace {
+    pub controller: Arc<NvmeController>,
     pub nsid: u32,
     pub command_set: NvmeCommandSet,
 
     // CNS 0x08 - command-set-indepedent fields
     pub independent: IdentifyNamespaceIndependent,
-}
-
-impl NvmeNamespace {
-    pub const fn new(
-        nsid: u32,
-        command_set: NvmeCommandSet,
-        independent: IdentifyNamespaceIndependent,
-    ) -> Self {
-        Self {
-            nsid,
-            command_set,
-            independent,
-        }
-    }
 }
 
 impl StorageDevice for NvmeNamespace {
@@ -33,6 +20,10 @@ impl StorageDevice for NvmeNamespace {
         num_lba: u64,
         buf: &mut [u8],
     ) -> Result<(), Self::Error> {
+        if start_lba + num_lba as u64 > self.command_set.block_count() {
+            return Ok(());
+        }
+
         Ok(())
     }
 

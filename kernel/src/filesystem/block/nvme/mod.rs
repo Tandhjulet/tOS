@@ -208,7 +208,12 @@ impl NvmeController {
             },
         );
 
-        NvmeNamespace::new(nsid, command_set, independent)
+        NvmeNamespace {
+            controller: self,
+            nsid,
+            command_set,
+            independent,
+        }
     }
 
     fn reset_and_disable(&mut self) {
@@ -486,57 +491,6 @@ impl NvmeController {
         }
     }
 
-    fn submit_admin_command(&mut self, cmd: SQEntry) -> CQEntry {
-        let sq = &mut self.adm_queue.as_mut().unwrap().subm;
-        let sq_id = sq.id;
-
-        let slot = sq.virt().unwrap() + (sq.state.tail as u64 * size_of::<SQEntry>() as u64);
-        unsafe {
-            write_volatile(slot as *mut SQEntry, cmd);
-        };
-
-        sq.state.tail = (sq.state.tail + 1) % sq.state.size as u16;
-        let tail = sq.state.tail;
-
-        let doorbell = self.sq_doorbell(sq_id);
-        unsafe {
-            self.write_reg(doorbell, tail as u32);
-        };
-
-        self.poll_admin_completion()
-    }
-
-    fn poll_admin_completion(&mut self) -> CQEntry {
-        loop {
-            let (slot, phase) = {
-                let cq = &self.adm_queue.as_mut().unwrap().comp;
-                let slot =
-                    cq.virt().unwrap() + (cq.state.head as u64 * size_of::<CQEntry>() as u64);
-                (slot, cq.state.phase)
-            };
-
-            let entry = unsafe { read_volatile(slot as *const CQEntry) };
-
-            if entry.status.phase_tag() == phase {
-                let doorbell = self.cq_doorbell(0);
-                let new_head = {
-                    let cq = &mut self.adm_queue.as_mut().unwrap().comp;
-                    cq.state.head += 1;
-                    if cq.state.head > cq.state.size as u16 {
-                        cq.state.head = 0;
-                        cq.state.phase = !cq.state.phase; // flip phase on wraparound
-                    }
-
-                    cq.state.head
-                };
-
-                unsafe { self.write_reg(doorbell, new_head as u32) };
-
-                return entry;
-            }
-        }
-    }
-
     fn sq_doorbell(&self, queue_id: u16) -> u32 {
         0x1000 + (2 * queue_id as u32) * (4 << self.cap.dstrd() as u32)
     }
@@ -659,6 +613,11 @@ pub struct IdentifyController {
     pub mn: [u8; 40],
     pub fr: [u8; 8],
     pub rab: u8,
+    pub ieee_oui: [u8; 3],
+    pub cmic: u8,
+    pub mdts: u8,
+    pub ctlr_id: u16,
+    pub ver: [u8; 3],
     // see Figure 275 for the rest of the fields... there's a lot
 }
 

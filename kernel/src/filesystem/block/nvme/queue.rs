@@ -1,6 +1,12 @@
-use core::{fmt::Display, marker::PhantomData};
+use core::{
+    fmt::Display,
+    marker::PhantomData,
+    ptr::{read_volatile, write_volatile},
+};
 
-use crate::allocator::mmio::MappedRegion;
+use alloc::sync::Arc;
+
+use crate::{allocator::mmio::MappedRegion, filesystem::block::nvme::NvmeController};
 
 pub trait QueueKind {}
 
@@ -33,8 +39,63 @@ impl Default for RingQueueState {
 }
 
 pub struct QueuePair {
+    pub controller: Arc<NvmeController>,
     pub subm: Queue<Submission>,
     pub comp: Queue<Completion>,
+}
+
+impl QueuePair {
+    pub fn submit_polled(&mut self, command: SQEntry) -> CQEntry {
+        self.submit_cmd(command);
+        self.next_completion()
+    }
+
+    pub fn submit_cmd(&mut self, command: SQEntry) {
+        let slot =
+            self.subm.virt().unwrap() + (self.subm.state.tail as u64 * size_of::<SQEntry>() as u64);
+        unsafe {
+            write_volatile(slot as *mut SQEntry, command);
+        };
+
+        self.subm.state.tail = (self.subm.state.tail + 1) % self.subm.state.size as u16;
+        let tail = self.subm.state.tail;
+
+        let doorbell = self.controller.sq_doorbell(self.subm.id);
+        unsafe {
+            self.controller.write_reg(doorbell, tail as u32);
+        };
+    }
+
+    pub fn next_completion(&mut self) -> CQEntry {
+        let (slot, phase) = {
+            let cq = &self.comp;
+            let slot = cq.virt().unwrap() + (cq.state.head as u64 * size_of::<CQEntry>() as u64);
+            (slot, cq.state.phase)
+        };
+
+        let entry = loop {
+            let entry = unsafe { read_volatile(slot as *const CQEntry) };
+            if entry.status.phase_tag() == phase {
+                break entry;
+            }
+        };
+
+        let doorbell = self.controller.cq_doorbell(self.comp.id);
+        let new_head = {
+            let cq = &mut self.comp;
+            cq.state.head += 1;
+            if cq.state.head > cq.state.size as u16 {
+                cq.state.head = 0;
+                cq.state.phase = !cq.state.phase; // flip phase on wraparound
+            }
+
+            cq.state.head
+        };
+
+        unsafe { self.controller.write_reg(doorbell, new_head as u32) };
+
+        entry
+    }
 }
 
 #[derive(Default)]
