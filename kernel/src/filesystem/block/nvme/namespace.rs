@@ -4,14 +4,74 @@ use crate::filesystem::block::StorageDevice;
 
 pub struct NvmeNamespace {
     pub nsid: u32,
-    pub csi: u8,
-
-    // CNS 0x00 - only NVM-based command sets (NVM and Zoned NS)
-    // Contains LBA formats, cap, metadata cap
-    pub nvm_base: Option<IdentifyNamespaceNvm>,
+    pub command_set: NvmeCommandSet,
 
     // CNS 0x08 - command-set-indepedent fields
     pub independent: IdentifyNamespaceIndependent,
+}
+
+impl NvmeNamespace {
+    pub const fn new(
+        nsid: u32,
+        command_set: NvmeCommandSet,
+        independent: IdentifyNamespaceIndependent,
+    ) -> Self {
+        Self {
+            nsid,
+            command_set,
+            independent,
+        }
+    }
+}
+
+impl StorageDevice for NvmeNamespace {
+    type Error = String;
+
+    fn read_blocks(
+        &mut self,
+        start_lba: u64,
+        num_lba: u64,
+        buf: &mut [u8],
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn write_blocks(&mut self, lba: u64, count: u64, buf: &[u8]) -> Result<(), Self::Error> {
+        todo!()
+    }
+
+    fn flush(&mut self) -> Result<(), Self::Error> {
+        todo!()
+    }
+}
+
+impl NvmeCommandSet {
+    pub fn block_size(&self) -> u32 {
+        match self {
+            NvmeCommandSet::Nvm(data) => data.identify.block_size(),
+            _ => todo!(),
+        }
+    }
+
+    pub fn block_count(&self) -> u64 {
+        match self {
+            NvmeCommandSet::Nvm(data) => data.identify.block_count(),
+            _ => todo!(),
+        }
+    }
+}
+
+pub enum NvmeCommandSet {
+    Nvm(NvmNamespaceData),
+    KeyValue(),
+    Zoned(),
+    Computational(),
+    SubsystemLocalMemory(),
+}
+
+pub struct NvmNamespaceData {
+    pub identify: IdentifyNamespaceNvm,
+    pub specific: IdentifyNamespaceSpecificNvm,
 }
 
 #[derive(Clone, Copy)]
@@ -42,6 +102,12 @@ pub struct IdentifyNamespaceNvm {
     pub _reserved: [u8; 73],   // fields 0x1B - 0x63 are not yet implemented
     pub lbaf: [LbaFormat; 64], // lba format support
     pub _pad: [u8; 3740],
+}
+
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub struct IdentifyNamespaceSpecificNvm {
+    pub _todo: [u8; 4096],
 }
 
 impl IdentifyNamespaceNvm {
@@ -91,20 +157,4 @@ pub struct IdentifyNamespaceIndependent {
     pub endgid: u16,   // endurance group identifier
     pub nstat: u8,     // namespace status
     pub _reserved2: [u8; 4081],
-}
-
-impl StorageDevice for NvmeNamespace {
-    type Error = String;
-
-    fn read_blocks(&mut self, lba: u64, count: u64, buf: &mut [u8]) -> Result<(), Self::Error> {
-        todo!()
-    }
-
-    fn write_blocks(&mut self, lba: u64, count: u64, buf: &[u8]) -> Result<(), Self::Error> {
-        todo!()
-    }
-
-    fn flush(&mut self) -> Result<(), Self::Error> {
-        todo!()
-    }
 }

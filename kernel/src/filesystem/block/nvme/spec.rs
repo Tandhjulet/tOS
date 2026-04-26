@@ -16,6 +16,14 @@ pub const AQA: u32 = 0x24;
 pub const ASQ: u32 = 0x28;
 pub const ACQ: u32 = 0x30;
 
+pub mod csi {
+    pub const NVM: u8 = 0x00;
+    pub const COMPUTATIONAL: u8 = 0x01;
+    pub const KEY_VALUE: u8 = 0x02;
+    pub const ZONED: u8 = 0x03;
+    pub const SUBSYSTEM_LOCAL_MEMORY: u8 = 0x04;
+}
+
 // See figure 138 for at list of operations
 pub mod op {
     pub const IDENTIFY: u32 = 0x06;

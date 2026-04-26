@@ -15,7 +15,7 @@ use crate::{
         nvme::{
             namespace::{
                 IdentifyNamespaceIndependent, IdentifyNamespaceList, IdentifyNamespaceNvm,
-                NvmeNamespace,
+                IdentifyNamespaceSpecificNvm, NvmNamespaceData, NvmeCommandSet, NvmeNamespace,
             },
             queue::{CQEntry, Completion, Queue, QueuePair, SQEntry, Submission},
         },
@@ -113,14 +113,12 @@ impl NvmeController {
         let mut registry = REGISTRY.lock();
         let nvme_id = NVME_COUNTER.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
         for ns in namespaces {
-            if let Some(base) = ns.nvm_base {
-                let id = DeviceId(format!("nvme{}n{}", nvme_id, ns.nsid));
+            let id = DeviceId(format!("nvme{}n{}", nvme_id, ns.nsid));
 
-                let block_size = base.block_size();
-                let block_count = base.block_count();
+            let block_size = ns.command_set.block_size();
+            let block_count = ns.command_set.block_count();
 
-                registry.register(id, Arc::new(Mutex::new(ns)), block_size, block_count)
-            }
+            registry.register(id, Arc::new(Mutex::new(ns)), block_size, block_count)
         }
     }
 
@@ -178,24 +176,26 @@ impl NvmeController {
     }
 
     fn build_namespace(&mut self, nsid: u32, csi: u8) -> NvmeNamespace {
-        let nvm_base = if Self::is_csi_nvm_based(csi) {
-            let ns_nvm = self.identify_read::<IdentifyNamespaceNvm>(
-                spec::op::identify::CNS_NAMESPACE,
-                |cmd| {
-                    cmd.nsid = nsid;
-                },
-            );
+        let command_set = match csi {
+            spec::csi::NVM => {
+                let identify = self.identify_read::<IdentifyNamespaceNvm>(
+                    spec::op::identify::CNS_NAMESPACE,
+                    |cmd| {
+                        cmd.nsid = nsid;
+                    },
+                );
+                let specific = self.identify_read::<IdentifyNamespaceSpecificNvm>(
+                    spec::op::identify::CNS_SPECIFIC_NS,
+                    |cmd| {
+                        cmd.nsid = nsid;
+                        cmd.cdw11 = (csi as u32) << 24;
+                    },
+                );
 
-            Some(ns_nvm)
-        } else {
-            None
+                NvmeCommandSet::Nvm(NvmNamespaceData { identify, specific })
+            }
+            _ => todo!(),
         };
-
-        // TODO: store CSI-specific meta
-        self.identify(spec::op::identify::CNS_SPECIFIC_NS, |cmd| {
-            cmd.nsid = nsid;
-            cmd.cdw11 = (csi as u32) << 24;
-        });
 
         self.identify(spec::op::identify::CNS_SPECIFIC_CTRLR, |cmd| {
             cmd.cdw11 = (csi as u32) << 24;
@@ -208,12 +208,7 @@ impl NvmeController {
             },
         );
 
-        NvmeNamespace {
-            nsid,
-            csi,
-            nvm_base,
-            independent,
-        }
+        NvmeNamespace::new(nsid, command_set, independent)
     }
 
     fn reset_and_disable(&mut self) {
@@ -282,8 +277,6 @@ impl NvmeController {
 
         const PHYS_CONTIG: u32 = 1;
         entry.cdw11 = PHYS_CONTIG | ((comp_id as u32) << 16);
-
-        println!("id: {id}, comp_id: {comp_id}");
 
         let res = self.submit_admin_command(entry);
         if !res.status.is_success() {
@@ -410,10 +403,6 @@ impl NvmeController {
         interrupt_mode.unwrap_or_else(|| {
             panic!("NVMe: no suitable interrupt mode could be enabled");
         })
-    }
-
-    fn is_csi_nvm_based(csi: u8) -> bool {
-        matches!(csi, 0x00 | 0x03)
     }
 
     fn identify_read<T: Copy>(&mut self, cns: u32, cmd: impl FnOnce(&mut SQEntry)) -> T {
