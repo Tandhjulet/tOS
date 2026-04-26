@@ -1,11 +1,11 @@
 use core::fmt::Display;
 
-use alloc::{
-    boxed::Box, collections::btree_map::BTreeMap, format, string::String, sync::Arc, vec::Vec,
-};
+use alloc::{boxed::Box, collections::btree_map::BTreeMap, string::String, sync::Arc};
 use spin::Mutex;
 
 pub mod nvme;
+
+static REGISTRY: Mutex<BlockDeviceRegistry> = Mutex::new(BlockDeviceRegistry::new());
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct DeviceId(String);
@@ -24,34 +24,26 @@ impl Display for DeviceId {
 
 pub struct BlockDeviceRegistry {
     devices: BTreeMap<DeviceId, Box<dyn BlockDevice>>,
-    type_counters: BTreeMap<&'static str, usize>,
 }
 
 impl BlockDeviceRegistry {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             devices: BTreeMap::new(),
-            type_counters: BTreeMap::new(),
         }
     }
 
     pub fn register<T>(
         &mut self,
-        type_name: &'static str,
+        id: DeviceId,
         device: Arc<Mutex<T>>,
         block_size: u32,
         block_count: u64,
-    ) -> DeviceId
-    where
+    ) where
         T: StorageDevice + Send + Sync + 'static,
     {
-        let counter = self.type_counters.entry(type_name).or_insert(0);
-        let id = DeviceId::new(format!("{}{}", type_name, counter));
-        *counter += 1;
-
         let descriptor = BlockDescriptor::new(device, block_size, block_count);
-        self.devices.insert(id.clone(), Box::new(descriptor));
-        id
+        self.devices.insert(id, Box::new(descriptor));
     }
 
     pub fn get(&self, id: &DeviceId) -> Option<&dyn BlockDevice> {

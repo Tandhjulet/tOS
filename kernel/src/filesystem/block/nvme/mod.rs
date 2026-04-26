@@ -5,13 +5,13 @@ use core::{
     ptr::{read_volatile, write_volatile},
 };
 
-use alloc::{boxed::Box, string::String, sync::Arc, vec::Vec};
+use alloc::{borrow::ToOwned, boxed::Box, string::String, sync::Arc, vec::Vec};
 use log::error;
 use spin::Mutex;
 
 use crate::{
     allocator::mmio::{MappedRegion, PAGE_SIZE, alloc_dma_region},
-    filesystem::block::StorageDevice,
+    filesystem::block::{DeviceId, REGISTRY, StorageDevice},
     io::pci::{PciDevice, bar::Bar},
     println,
     sys::interrupts::{
@@ -89,8 +89,6 @@ pub struct NvmeController {
     adm_buf: MappedRegion,
 
     queues: Vec<QueuePair>,
-
-    namespaces: Vec<NvmeNamespace>,
 }
 
 impl NvmeController {
@@ -113,7 +111,6 @@ impl NvmeController {
                 adm_queue: None,
                 queues: Vec::new(),
                 adm_buf: alloc_dma_region(PAGE_SIZE),
-                namespaces: Vec::new(),
             }
         };
 
@@ -140,17 +137,35 @@ impl NvmeController {
     }
 
     fn init(this: &Arc<Mutex<Self>>) {
-        let queue_cnt = {
+        let namespaces: Vec<NvmeNamespace> = {
             let mut controller = this.lock();
             controller.reset_and_disable();
             let mut cfg = controller.configure();
             controller.enable(&mut cfg);
             controller.run_identify_seq(&mut cfg);
-            controller.init_queue_cnt() as u32
+
+            let namespaces = controller.enumerate_namespaces();
+            namespaces
         };
 
-        this.lock().setup_interrupts(this, queue_cnt);
-        this.lock().create_io_queues(queue_cnt);
+        {
+            let mut controller = this.lock();
+            let queue_cnt = controller.init_queue_cnt() as u32;
+
+            controller.setup_interrupts(this, queue_cnt);
+            controller.create_io_queues(queue_cnt);
+        };
+
+        let mut registry = REGISTRY.lock();
+        for ns in namespaces {
+            if let Some(base) = ns.nvm_base {
+                let id = DeviceId("nvme".to_owned());
+                let block_size = base.block_size();
+                let block_count = base.block_count();
+
+                registry.register(id, Arc::new(Mutex::new(ns)), block_size, block_count)
+            }
+        }
     }
 
     fn create_io_queues(&mut self, queue_cnt: u32) {
@@ -172,12 +187,10 @@ impl NvmeController {
         if cfg.css() == 0 {
             // TODO
         }
-        if self.cap.css_some() {
-            self.enumerate_namespaces();
-        }
     }
 
-    fn enumerate_namespaces(&mut self) {
+    fn enumerate_namespaces(&mut self) -> Vec<NvmeNamespace> {
+        let mut namespaces = Vec::new();
         let cmd_set =
             self.identify_read::<IdentifyCommandSet>(cfg::op::identify::CNS_CMD_SET, |_| {});
         let selected_cmd_idx = cmd_set.first_valid().unwrap();
@@ -201,9 +214,11 @@ impl NvmeController {
 
             for &nsid in nsids.valid() {
                 let namespace = self.build_namespace(nsid, csi);
-                self.namespaces.push(namespace);
+                namespaces.push(namespace);
             }
         }
+
+        namespaces
     }
 
     fn build_namespace(&mut self, nsid: u32, csi: u8) -> NvmeNamespace {
@@ -896,12 +911,16 @@ impl IdentifyNamespaceNvm {
         self.lbaf[self.active_lbaf_idx()]
     }
 
-    pub fn block_size(&self) -> u64 {
+    pub fn block_size(&self) -> u32 {
         1 << self.active_lbaf().lbads
     }
 
+    pub fn block_count(&self) -> u64 {
+        self.nsze
+    }
+
     pub fn size_bytes(&self) -> u64 {
-        self.nsze * self.block_size()
+        self.nsze * self.block_size() as u64
     }
 }
 
@@ -930,7 +949,7 @@ pub struct IdentifyNamespaceIndependent {
     pub _reserved2: [u8; 4081],
 }
 
-impl StorageDevice for NvmeController {
+impl StorageDevice for NvmeNamespace {
     type Error = String;
 
     fn read_blocks(&mut self, lba: u64, count: u64, buf: &mut [u8]) -> Result<(), Self::Error> {
