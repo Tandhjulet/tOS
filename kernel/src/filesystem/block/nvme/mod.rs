@@ -1,17 +1,24 @@
 use core::{
     cmp::min,
-    fmt::Display,
-    marker::PhantomData,
     ptr::{read_volatile, write_volatile},
 };
 
-use alloc::{borrow::ToOwned, boxed::Box, string::String, sync::Arc, vec::Vec};
+use alloc::{borrow::ToOwned, boxed::Box, sync::Arc, vec::Vec};
 use log::error;
 use spin::Mutex;
 
 use crate::{
     allocator::mmio::{MappedRegion, PAGE_SIZE, alloc_dma_region},
-    filesystem::block::{DeviceId, REGISTRY, StorageDevice},
+    filesystem::block::{
+        DeviceId, REGISTRY,
+        nvme::{
+            namespace::{
+                IdentifyNamespaceIndependent, IdentifyNamespaceList, IdentifyNamespaceNvm,
+                NvmeNamespace,
+            },
+            queue::{CQEntry, Completion, Queue, QueuePair, SQEntry, Submission},
+        },
+    },
     io::pci::{PciDevice, bar::Bar},
     println,
     sys::interrupts::{
@@ -19,65 +26,9 @@ use crate::{
     },
 };
 
-///
-/// NVMe Documentation:
-/// - Base specification: https://nvmexpress.org/wp-content/uploads/NVMe-NVM-Express-2.0a-2021.07.26-Ratified.pdf
-/// - NVMe over PCIe specification: https://nvmexpress.org/wp-content/uploads/NVM-Express-NVMe-over-PCIe-Transport-Specification-Revision-1.3-2025.08.01-Ratified.pdf
-/// - NVM Host Controller Interface (has good overview over commands): https://www.nvmexpress.org/wp-content/uploads/NVM-Express-1_1a.pdf
-///
-pub mod cfg {
-    pub const IO_QUEUES: u16 = 2;
-
-    pub const CAP: u32 = 0x0;
-    pub const VS: u32 = 0x08;
-    pub const INTMS: u32 = 0x0C;
-    pub const INTMC: u32 = 0x10;
-    pub const CC: u32 = 0x14;
-    pub const CSTS: u32 = 0x1C;
-    pub const AQA: u32 = 0x24;
-    pub const ASQ: u32 = 0x28;
-    pub const ACQ: u32 = 0x30;
-
-    // See figure 138 for at list of operations
-    pub mod op {
-        pub const IDENTIFY: u32 = 0x06;
-        pub const SET_FEATURES: u32 = 0x09;
-        pub const GET_FEATURES: u32 = 0x0A;
-        pub const DEL_SUBQ: u32 = 0x0;
-        pub const CRT_SUBQ: u32 = 0x01;
-        pub const DEL_CMPQ: u32 = 0x04;
-        pub const CRT_CMPQ: u32 = 0x05;
-
-        // For a list of Identify CNS values and reference sections, view figure 273
-        pub mod identify {
-            pub const CNS_NAMESPACE: u32 = 0x0;
-            pub const CNS_CONTROLLER: u32 = 0x1;
-            pub const CNS_SPECIFIC_NS: u32 = 0x5;
-            pub const CNS_SPECIFIC_CTRLR: u32 = 0x6;
-            pub const CNS_ACTIVE_NS_CMD_SET: u32 = 0x7;
-            pub const CNS_NAMESPACE_INDEPENDENT: u32 = 0x8;
-            pub const CNS_CMD_SET: u32 = 0x1C;
-        }
-
-        pub mod features {
-            pub const FID_NUM_QUEUES: u32 = 0x07;
-            pub const FID_SET_PROFILE: u32 = 0x19;
-            pub const FID_INT_VEC_CONF: u32 = 0x09;
-        }
-    }
-}
-
-pub struct NvmeNamespace {
-    pub nsid: u32,
-    pub csi: u8,
-
-    // CNS 0x00 - only NVM-based command sets (NVM and Zoned NS)
-    // Contains LBA formats, cap, metadata cap
-    pub nvm_base: Option<IdentifyNamespaceNvm>,
-
-    // CNS 0x08 - command-set-indepedent fields
-    pub independent: IdentifyNamespaceIndependent,
-}
+pub mod namespace;
+pub mod queue;
+pub mod spec;
 
 pub struct NvmeController {
     device: Arc<Mutex<PciDevice>>,
@@ -120,7 +71,7 @@ impl NvmeController {
     }
 
     fn get_capabilities(bar: &Bar) -> ControllerCap {
-        let cap = unsafe { bar.read64(cfg::CAP) };
+        let cap = unsafe { bar.read64(spec::CAP) };
         ControllerCap(cap)
     }
 
@@ -131,7 +82,7 @@ impl NvmeController {
                 panic!("Could not find BAR0 for NVMe!");
             };
 
-            unsafe { bar.read32(cfg::CC) }
+            unsafe { bar.read32(spec::CC) }
         };
         ControllerConfig(cc)
     }
@@ -181,7 +132,7 @@ impl NvmeController {
 
     fn run_identify_seq(&mut self, cfg: &mut ControllerConfig) {
         let identify_ctrlr =
-            self.identify_read::<IdentifyController>(cfg::op::identify::CNS_CONTROLLER, |_| {});
+            self.identify_read::<IdentifyController>(spec::op::identify::CNS_CONTROLLER, |_| {});
         self.identify_ctlr = Some(identify_ctrlr);
 
         if cfg.css() == 0 {
@@ -192,18 +143,18 @@ impl NvmeController {
     fn enumerate_namespaces(&mut self) -> Vec<NvmeNamespace> {
         let mut namespaces = Vec::new();
         let cmd_set =
-            self.identify_read::<IdentifyCommandSet>(cfg::op::identify::CNS_CMD_SET, |_| {});
+            self.identify_read::<IdentifyCommandSet>(spec::op::identify::CNS_CMD_SET, |_| {});
         let selected_cmd_idx = cmd_set.first_valid().unwrap();
 
         // Refer to section 5.27.1.21 for documentation regarding
         // I/O Command Set Profile (FID: 0x19)
-        self.set_features(cfg::op::features::FID_SET_PROFILE, |features| {
+        self.set_features(spec::op::features::FID_SET_PROFILE, |features| {
             features.cdw11 = selected_cmd_idx as u32;
         });
 
         for csi in cmd_set.csi_iter(selected_cmd_idx) {
             let nsids = self.identify_read::<IdentifyNamespaceList>(
-                cfg::op::identify::CNS_ACTIVE_NS_CMD_SET,
+                spec::op::identify::CNS_ACTIVE_NS_CMD_SET,
                 |identify| {
                     identify.nsid = 0;
 
@@ -224,7 +175,7 @@ impl NvmeController {
     fn build_namespace(&mut self, nsid: u32, csi: u8) -> NvmeNamespace {
         let nvm_base = if Self::is_csi_nvm_based(csi) {
             let ns_nvm = self.identify_read::<IdentifyNamespaceNvm>(
-                cfg::op::identify::CNS_NAMESPACE,
+                spec::op::identify::CNS_NAMESPACE,
                 |cmd| {
                     cmd.nsid = nsid;
                 },
@@ -236,17 +187,17 @@ impl NvmeController {
         };
 
         // TODO: store CSI-specific meta
-        self.identify(cfg::op::identify::CNS_SPECIFIC_NS, |cmd| {
+        self.identify(spec::op::identify::CNS_SPECIFIC_NS, |cmd| {
             cmd.nsid = nsid;
             cmd.cdw11 = (csi as u32) << 24;
         });
 
-        self.identify(cfg::op::identify::CNS_SPECIFIC_CTRLR, |cmd| {
+        self.identify(spec::op::identify::CNS_SPECIFIC_CTRLR, |cmd| {
             cmd.cdw11 = (csi as u32) << 24;
         });
 
         let independent = self.identify_read::<IdentifyNamespaceIndependent>(
-            cfg::op::identify::CNS_NAMESPACE_INDEPENDENT,
+            spec::op::identify::CNS_NAMESPACE_INDEPENDENT,
             |cmd| {
                 cmd.nsid = nsid;
             },
@@ -263,10 +214,10 @@ impl NvmeController {
     fn reset_and_disable(&mut self) {
         let mut cfg = self.get_configuration();
         cfg.set_enabled(false);
-        unsafe { self.write_reg(cfg::CC, cfg.raw()) };
+        unsafe { self.write_reg(spec::CC, cfg.raw()) };
 
         // wait for controller to disable
-        while (unsafe { self.read_reg(cfg::CSTS) } & 0x1) == 1 {}
+        while (unsafe { self.read_reg(spec::CSTS) } & 0x1) == 1 {}
 
         let admin_queues = self.create_admin_queues();
         self.adm_queue = Some(admin_queues);
@@ -286,7 +237,7 @@ impl NvmeController {
             .set_iocqes(4) // Comp entry size: 2^4 = 16 bytes
             .set_iosqes(6); // Subm entry size: 2^6 = 64 bytes
 
-        unsafe { self.write_reg(cfg::CC, cfg.raw()) };
+        unsafe { self.write_reg(spec::CC, cfg.raw()) };
 
         cfg
     }
@@ -303,10 +254,10 @@ impl NvmeController {
 
     fn enable(&mut self, cfg: &mut ControllerConfig) {
         cfg.set_enabled(true);
-        unsafe { self.write_reg(cfg::CC, cfg.raw()) };
+        unsafe { self.write_reg(spec::CC, cfg.raw()) };
 
         // wait for controller to enable
-        while (unsafe { self.read_reg(cfg::CSTS) } & 0x1) == 0 {}
+        while (unsafe { self.read_reg(spec::CSTS) } & 0x1) == 0 {}
     }
 
     pub fn create_io_subm_queue(
@@ -319,7 +270,7 @@ impl NvmeController {
         let pages = alloc_dma_region(size as u64);
 
         let mut entry = SQEntry::default();
-        entry.cdw0 = cfg::op::CRT_SUBQ | (1 << 16);
+        entry.cdw0 = spec::op::CRT_SUBQ | (1 << 16);
         entry.prp1 = pages.phys().as_u64();
 
         entry.cdw10 = (id as u32) | ((max_entries as u32 - 1) << 16);
@@ -354,7 +305,7 @@ impl NvmeController {
         let pages = alloc_dma_region(size as u64);
 
         let mut entry = SQEntry::default();
-        entry.cdw0 = cfg::op::CRT_CMPQ | (1 << 16);
+        entry.cdw0 = spec::op::CRT_CMPQ | (1 << 16);
         entry.prp1 = pages.phys().as_u64();
         entry.cdw10 = (id as u32) | ((max_entries as u32 - 1) << 16);
 
@@ -387,14 +338,14 @@ impl NvmeController {
     }
 
     fn init_queue_cnt(&mut self) -> u16 {
-        let io_queue_count_raw = self.set_features(cfg::op::features::FID_NUM_QUEUES, |cmd| {
-            cmd.cdw11 = ((cfg::IO_QUEUES as u32 - 1) << 16) | (cfg::IO_QUEUES as u32 - 1);
+        let io_queue_count_raw = self.set_features(spec::op::features::FID_NUM_QUEUES, |cmd| {
+            cmd.cdw11 = ((spec::IO_QUEUES as u32 - 1) << 16) | (spec::IO_QUEUES as u32 - 1);
         });
 
         let io_comp_queues = (io_queue_count_raw.dw0 >> 16) as u16 + 1;
         let io_subm_queues = io_queue_count_raw.dw0 as u16 + 1;
 
-        min(io_comp_queues, io_subm_queues).min(cfg::IO_QUEUES)
+        min(io_comp_queues, io_subm_queues).min(spec::IO_QUEUES)
     }
 
     pub fn nvme_int_handler(&self) -> IrqResult {
@@ -468,7 +419,7 @@ impl NvmeController {
 
     fn identify(&mut self, cns: u32, cmd: impl FnOnce(&mut SQEntry)) -> CQEntry {
         let mut identify = SQEntry::default();
-        identify.cdw0 = cfg::op::IDENTIFY | (1 << 16);
+        identify.cdw0 = spec::op::IDENTIFY | (1 << 16);
         identify.prp1 = self.adm_buf.phys().as_u64();
         identify.cdw10 = cns;
 
@@ -479,7 +430,7 @@ impl NvmeController {
 
     fn set_features(&mut self, fid: u32, cmd: impl FnOnce(&mut SQEntry)) -> CQEntry {
         let mut features = SQEntry::default();
-        features.cdw0 = cfg::op::SET_FEATURES | (1 << 16);
+        features.cdw0 = spec::op::SET_FEATURES | (1 << 16);
         features.prp1 = self.adm_buf.phys().as_u64();
         features.cdw10 = fid;
 
@@ -528,11 +479,11 @@ impl NvmeController {
         acq.id = 0;
 
         let aqa = ((acq.state.size as u32) << 16) | (asq.state.size as u32);
-        unsafe { bar.write32(cfg::AQA, aqa) };
+        unsafe { bar.write32(spec::AQA, aqa) };
 
         unsafe {
-            bar.write64(cfg::ASQ, asq.phys().unwrap());
-            bar.write64(cfg::ACQ, acq.phys().unwrap());
+            bar.write64(spec::ASQ, asq.phys().unwrap());
+            bar.write64(spec::ACQ, acq.phys().unwrap());
         }
 
         QueuePair {
@@ -705,130 +656,6 @@ impl ControllerCap {
     }
 }
 
-pub trait QueueKind {}
-
-#[derive(Default)]
-pub struct Submission;
-#[derive(Default)]
-pub struct Completion;
-
-impl QueueKind for Submission {}
-impl QueueKind for Completion {}
-
-#[derive(Debug)]
-struct RingQueueState {
-    size: u64,
-
-    tail: u16,
-    head: u16,
-    phase: bool,
-}
-
-impl Default for RingQueueState {
-    fn default() -> Self {
-        Self {
-            size: Default::default(),
-            tail: Default::default(),
-            head: Default::default(),
-            phase: true,
-        }
-    }
-}
-
-pub struct QueuePair {
-    subm: Queue<Submission>,
-    comp: Queue<Completion>,
-}
-
-#[derive(Default)]
-pub struct Queue<K: QueueKind> {
-    id: u16,
-    region: Option<MappedRegion>,
-    state: RingQueueState,
-    _phantom: PhantomData<K>,
-}
-
-impl<K: QueueKind> Queue<K> {
-    pub fn phys(&self) -> Option<u64> {
-        self.region.as_ref().map(|r| r.phys().as_u64())
-    }
-
-    pub fn virt(&self) -> Option<u64> {
-        self.region.as_ref().map(|r| r.virt().as_u64())
-    }
-}
-
-impl Queue<Submission> {}
-
-#[derive(Default)]
-#[repr(C)]
-pub struct SQEntry {
-    pub cdw0: u32,
-    pub nsid: u32,
-    pub reserved: u64,
-    pub mptr: u64,
-    pub prp1: u64,
-    pub prp2: u64,
-    pub cdw10: u32,
-    pub cdw11: u32,
-    pub cdw12: u32,
-    pub cdw13: u32,
-    pub cdw14: u32,
-    pub cdw15: u32,
-}
-
-#[repr(C)]
-pub struct CQEntry {
-    pub dw0: u32,
-    pub dw1: u32,
-    pub sq_head: u16,
-    pub sq_id: u16,
-    pub cid: u16,
-    pub status: Status,
-}
-
-#[repr(transparent)]
-pub struct Status(u16);
-
-impl Status {
-    pub fn phase_tag(&self) -> bool {
-        self.0 & 1 != 0
-    }
-
-    pub fn code(&self) -> u8 {
-        ((self.0 >> 1) & 0xFF) as u8
-    }
-
-    pub fn code_type(&self) -> u8 {
-        ((self.0 >> 9) & 0x7) as u8
-    }
-
-    pub fn more(&self) -> bool {
-        self.0 & (1 << 14) != 0
-    }
-
-    pub fn do_not_retry(&self) -> bool {
-        self.0 & (1 << 15) > 0
-    }
-
-    pub fn is_success(&self) -> bool {
-        self.code_type() == 0 && self.code() == 0
-    }
-}
-
-impl Display for Status {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(
-            f,
-            "0b{:016b} (type={}, code={}, success={})",
-            self.0,
-            self.code_type(),
-            self.code(),
-            self.is_success()
-        )
-    }
-}
-
 #[derive(Clone, Copy)]
 #[repr(C)]
 pub struct IdentifyController {
@@ -867,100 +694,5 @@ impl IdentifyCommandSet {
     pub fn csi_iter(&self, idx: usize) -> impl Iterator<Item = u8> {
         let entry = self.iocsc[idx];
         (0u8..3).filter(move |&bit| entry & (1 << bit) == 1)
-    }
-}
-
-#[derive(Clone, Copy)]
-#[repr(C)]
-pub struct IdentifyNamespaceList {
-    pub namespaces: [u32; 1024],
-}
-
-impl IdentifyNamespaceList {
-    pub fn valid(&self) -> impl Iterator<Item = &u32> {
-        self.namespaces.iter().take_while(|&&n| n != 0)
-    }
-}
-
-///
-/// Refer to https://nvmexpress.org/wp-content/uploads/NVM-Express-NVM-Command-Set-Specification-Revision-1.1-2024.08.05-Ratified.pdf
-/// figure 114 for documentation regarding the implementation
-///
-#[derive(Clone, Copy)]
-#[repr(C)]
-pub struct IdentifyNamespaceNvm {
-    pub nsze: u64,             // size
-    pub ncap: u64,             // capacity
-    pub nuse: u64,             // utilization
-    pub nsfeat: u8,            // features
-    pub nlbaf: u8,             // number of LBA formats
-    pub flbas: u8,             // formatted LBA size
-    pub _reserved: [u8; 73],   // fields 0x1B - 0x63 are not yet implemented
-    pub lbaf: [LbaFormat; 64], // lba format support
-    pub _pad: [u8; 3740],
-}
-
-impl IdentifyNamespaceNvm {
-    pub fn active_lbaf_idx(&self) -> usize {
-        let low = (self.flbas & 0xF) as usize;
-        let high = (self.flbas >> 5 & 0x3) as usize;
-        (high << 4) | low
-    }
-
-    pub fn active_lbaf(&self) -> LbaFormat {
-        self.lbaf[self.active_lbaf_idx()]
-    }
-
-    pub fn block_size(&self) -> u32 {
-        1 << self.active_lbaf().lbads
-    }
-
-    pub fn block_count(&self) -> u64 {
-        self.nsze
-    }
-
-    pub fn size_bytes(&self) -> u64 {
-        self.nsze * self.block_size() as u64
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-#[repr(C)]
-pub struct LbaFormat {
-    pub ms: u16,   // Metadata Size per LBA
-    pub lbads: u8, // LBA Data Size (reported as 2^self.lbads)
-    pub rp: u8,    // Relative Performance
-}
-
-// See Figure 280 in the base specification
-#[derive(Clone, Copy)]
-#[repr(C)]
-pub struct IdentifyNamespaceIndependent {
-    pub nsfeat: u8,    // namespace features
-    pub nmic: u8,      // multi-path I/O and sharing capabilities
-    pub rescap: u8,    // reservation capabilities
-    pub fpi: u8,       // format progress indicator
-    pub anagrpid: u32, // ANA group identifier
-    pub nsattr: u8,    // namespace attributes
-    pub _reserved: u8,
-    pub nvmsetid: u16, // NVM set identifier
-    pub endgid: u16,   // endurance group identifier
-    pub nstat: u8,     // namespace status
-    pub _reserved2: [u8; 4081],
-}
-
-impl StorageDevice for NvmeNamespace {
-    type Error = String;
-
-    fn read_blocks(&mut self, lba: u64, count: u64, buf: &mut [u8]) -> Result<(), Self::Error> {
-        todo!()
-    }
-
-    fn write_blocks(&mut self, lba: u64, count: u64, buf: &[u8]) -> Result<(), Self::Error> {
-        todo!()
-    }
-
-    fn flush(&mut self) -> Result<(), Self::Error> {
-        todo!()
     }
 }
