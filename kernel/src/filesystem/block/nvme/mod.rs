@@ -1,9 +1,10 @@
 use core::{
     cmp::min,
     ptr::{read_volatile, write_volatile},
+    sync::atomic::AtomicUsize,
 };
 
-use alloc::{borrow::ToOwned, boxed::Box, sync::Arc, vec::Vec};
+use alloc::{boxed::Box, format, sync::Arc, vec::Vec};
 use log::error;
 use spin::Mutex;
 
@@ -29,6 +30,8 @@ use crate::{
 pub mod namespace;
 pub mod queue;
 pub mod spec;
+
+static NVME_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 pub struct NvmeController {
     device: Arc<Mutex<PciDevice>>,
@@ -108,9 +111,11 @@ impl NvmeController {
         };
 
         let mut registry = REGISTRY.lock();
+        let nvme_id = NVME_COUNTER.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
         for ns in namespaces {
             if let Some(base) = ns.nvm_base {
-                let id = DeviceId("nvme".to_owned());
+                let id = DeviceId(format!("nvme{}n{}", nvme_id, ns.nsid));
+
                 let block_size = base.block_size();
                 let block_count = base.block_count();
 
