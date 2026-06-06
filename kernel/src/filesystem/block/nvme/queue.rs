@@ -95,11 +95,7 @@ impl Future for NvmeFuture {
     }
 }
 
-pub trait QueuePairKind {
-    fn submit_async(pair: &mut QueuePair<Self>, command: SQEntry) -> impl Future<Output = CQEntry>
-    where
-        Self: Sized;
-}
+pub trait QueuePairKind {}
 
 pub struct Io {
     pub pending: Arc<Mutex<BTreeMap<u16, PendingCommand>>>,
@@ -124,37 +120,9 @@ impl Admin {
     }
 }
 
-impl QueuePairKind for Admin {
-    fn submit_async(pair: &mut QueuePair<Self>, command: SQEntry) -> impl Future<Output = CQEntry>
-    where
-        Self: Sized,
-    {
-        let cq = Self::submit_polled(pair, command);
-        core::future::ready(cq)
-    }
-}
+impl QueuePairKind for Admin {}
 
-impl QueuePairKind for Io {
-    fn submit_async(pair: &mut QueuePair<Self>, command: SQEntry) -> impl Future<Output = CQEntry>
-    where
-        Self: Sized,
-    {
-        let id = pair.subm.state.tail;
-        pair.kind.pending.lock().insert(
-            id,
-            PendingCommand {
-                waker: None,
-                result: None,
-            },
-        );
-        pair.submit_cmd(command);
-
-        NvmeFuture {
-            id,
-            pending: Arc::clone(&pair.kind.pending),
-        }
-    }
-}
+impl QueuePairKind for Io {}
 
 impl QueuePair<Io> {
     pub fn new_io(
@@ -169,6 +137,25 @@ impl QueuePair<Io> {
             kind: Io {
                 pending: Arc::new(Mutex::new(BTreeMap::new())),
             },
+        }
+    }
+
+    pub fn submit(&mut self, command: impl NvmeCommand) -> NvmeFuture {
+        let id = self.subm.state.tail;
+        self.kind.pending.lock().insert(
+            id,
+            PendingCommand {
+                waker: None,
+                result: None,
+            },
+        );
+
+        let entry = Self::build_entry(command);
+        self.submit_cmd(entry);
+
+        NvmeFuture {
+            id,
+            pending: Arc::clone(&self.kind.pending),
         }
     }
 
@@ -205,7 +192,7 @@ impl QueuePair<Admin> {
         }
     }
 
-    pub fn submit_sync<C: NvmeCommand>(&mut self, command: C) -> CQEntry {
+    pub fn submit<C: NvmeCommand>(&mut self, command: C) -> CQEntry {
         Admin::submit_polled(self, Self::build_entry(command))
     }
 
@@ -233,10 +220,6 @@ impl<K: QueuePairKind> QueuePair<K> {
         entry
     }
 
-    pub fn submit<C: NvmeCommand>(&mut self, command: C) -> impl Future<Output = CQEntry> {
-        K::submit_async(self, Self::build_entry(command))
-    }
-
     fn submit_cmd(&mut self, command: SQEntry) {
         let slot =
             self.subm.virt().unwrap() + (self.subm.state.tail as u64 * size_of::<SQEntry>() as u64);
@@ -249,7 +232,7 @@ impl<K: QueuePairKind> QueuePair<K> {
         unsafe { self.write_reg(doorbell, tail as u32) }
     }
 
-    pub fn try_complete(&mut self) -> Option<CQEntry> {
+    fn try_complete(&mut self) -> Option<CQEntry> {
         let cq = &self.comp;
         let slot = cq.virt().unwrap() + (cq.state.head as u64 * size_of::<CQEntry>() as u64);
         let entry = unsafe { read_volatile(slot as *const CQEntry) };

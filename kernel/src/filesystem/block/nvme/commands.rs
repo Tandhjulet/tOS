@@ -71,6 +71,25 @@ impl NvmeCommand for CreateCompletionQueueCommand {
     }
 }
 
+pub struct ReadCommand {
+    pub prp: u64,
+    pub slba: u64,
+    pub cdw12: u32,
+    pub dsm: u8,
+}
+
+impl NvmeCommand for ReadCommand {
+    const OPCODE: u32 = spec::op::READ;
+
+    fn configure(self, entry: &mut SQEntry) {
+        entry.prp1 = self.prp;
+        entry.cdw10 = self.slba as u32;
+        entry.cdw11 = (self.slba >> 32) as u32;
+        entry.cdw12 = self.cdw12;
+        entry.cdw13 = self.dsm as u32;
+    }
+}
+
 pub struct ControllerConfig(pub u32);
 
 impl ControllerConfig {

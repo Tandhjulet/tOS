@@ -1,9 +1,15 @@
-use alloc::{string::String, sync::Arc};
+use alloc::sync::Arc;
 use spin::Mutex;
 
-use crate::filesystem::block::{
-    StorageDevice,
-    nvme::queue::{Io, QueuePair},
+use crate::{
+    allocator::mmio::alloc_dma_region,
+    filesystem::block::{
+        BlockDevice, BlockDeviceError, BlockDeviceIo,
+        nvme::{
+            commands::ReadCommand,
+            queue::{Io, QueuePair},
+        },
+    },
 };
 
 pub struct NvmeNamespace {
@@ -15,27 +21,57 @@ pub struct NvmeNamespace {
     pub independent: IdentifyNamespaceIndependent,
 }
 
-impl StorageDevice for NvmeNamespace {
-    type Error = String;
+impl BlockDevice for NvmeNamespace {
+    fn block_size(&self) -> u32 {
+        self.command_set.block_size()
+    }
 
-    fn read_blocks(
-        &mut self,
-        start_lba: u64,
-        num_lba: u64,
-        buf: &mut [u8],
-    ) -> Result<(), Self::Error> {
-        if start_lba + num_lba as u64 > self.command_set.block_count() {
-            return Ok(());
+    fn block_count(&self) -> u64 {
+        self.command_set.block_count()
+    }
+}
+
+impl BlockDeviceIo for NvmeNamespace {
+    async fn read(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), BlockDeviceError> {
+        let block_size = self.block_size() as u64;
+        let count = buf.len() as u64 / block_size;
+
+        if lba + count > self.block_count() {
+            return Err(BlockDeviceError::InvalidRange { lba, count });
         }
+
+        if buf.len() as u64 % block_size != 0 {
+            return Err(BlockDeviceError::NotAligned);
+        }
+
+        let dma = alloc_dma_region(count * block_size);
+
+        let future = {
+            let mut queue = self.queue.lock();
+            queue.submit(ReadCommand {
+                prp: dma.phys().as_u64(),
+                slba: lba,
+                cdw12: count as u32,
+                dsm: 0,
+            })
+        };
+
+        let entry = future.await;
+        if !entry.status.is_success() {
+            return Err(BlockDeviceError::IoError);
+        }
+
+        let src = unsafe { core::slice::from_raw_parts(dma.virt().as_ptr(), buf.len()) };
+        buf.copy_from_slice(src);
 
         Ok(())
     }
 
-    fn write_blocks(&mut self, lba: u64, count: u64, buf: &[u8]) -> Result<(), Self::Error> {
+    async fn write(&mut self, lba: u64, buf: &[u8]) -> Result<(), BlockDeviceError> {
         todo!()
     }
 
-    fn flush(&mut self) -> Result<(), Self::Error> {
+    async fn flush(&mut self) -> Result<(), BlockDeviceError> {
         todo!()
     }
 }

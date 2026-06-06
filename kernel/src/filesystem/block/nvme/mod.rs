@@ -7,7 +7,7 @@ use spin::Mutex;
 use crate::{
     allocator::mmio::{PAGE_SIZE, alloc_dma_region},
     filesystem::block::{
-        DeviceId, REGISTRY,
+        BlockDevice, DeviceId, REGISTRY,
         nvme::{
             commands::{
                 AmsType, ControllerCap, ControllerConfig, CreateCompletionQueueCommand,
@@ -121,13 +121,11 @@ impl NvmeController {
 
         let mut registry = REGISTRY.lock();
         let nvme_id = NVME_COUNTER.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
-        for ns in namespaces {
-            let id = DeviceId(format!("nvme{}n{}", nvme_id, ns.nsid));
+        for namespace in namespaces {
+            let id = DeviceId(format!("nvme{}n{}", nvme_id, namespace.nsid));
 
-            let block_size = ns.command_set.block_size();
-            let block_count = ns.command_set.block_count();
-
-            registry.register(id, Arc::new(Mutex::new(ns)), block_size, block_count)
+            let block_device: Arc<Mutex<dyn BlockDevice>> = Arc::new(Mutex::new(namespace));
+            registry.register(id, block_device);
         }
     }
 
@@ -390,7 +388,7 @@ impl NvmeController {
     }
 
     pub unsafe fn submit_admin_command(&mut self, command: impl NvmeCommand) -> CQEntry {
-        unsafe { self.admin_queue() }.submit_sync(command)
+        unsafe { self.admin_queue() }.submit(command)
     }
 
     pub unsafe fn submit_read_admin_command<T: Copy>(&mut self, command: impl NvmeCommand) -> T {

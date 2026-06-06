@@ -24,8 +24,9 @@ pub mod csi {
     pub const SUBSYSTEM_LOCAL_MEMORY: u8 = 0x04;
 }
 
-// See figure 138 for at list of operations
+// See figure 138 (admin) and figure 390 (IO) for at list of operations
 pub mod op {
+    // ADMIN
     pub const IDENTIFY: u32 = 0x06;
     pub const SET_FEATURES: u32 = 0x09;
     pub const GET_FEATURES: u32 = 0x0A;
@@ -33,6 +34,11 @@ pub mod op {
     pub const CRT_SUBQ: u32 = 0x01;
     pub const DEL_CMPQ: u32 = 0x04;
     pub const CRT_CMPQ: u32 = 0x05;
+
+    // IO
+    pub const FLUSH: u32 = 0x00;
+    pub const WRITE: u32 = 0x01;
+    pub const READ: u32 = 0x02;
 
     // For a list of Identify CNS values and reference sections, view figure 273
     pub mod identify {
