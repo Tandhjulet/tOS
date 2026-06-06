@@ -139,7 +139,13 @@ pub enum InterruptIndex {
 seq!(N in 32..=255 {
     extern "x86-interrupt" fn irq_handler_~N(_stack_frame: InterruptStackFrame) {
         let handlers = HANDLERS.lock();
-        let handler = handlers.get(N - 32).expect("Length of HANDLERS should be 256 - 32");
+        let handler = handlers.get(N - MIN_INTERRUPT).unwrap_or_else(|| {
+            panic!(
+                "Length of HANDLERS should be {} (256 - {})",
+                256 - MIN_INTERRUPT,
+                MIN_INTERRUPT
+            )
+        });
 
         match handler {
             Some(f) => match f() {
