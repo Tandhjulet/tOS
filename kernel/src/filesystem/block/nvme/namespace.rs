@@ -6,7 +6,7 @@ use crate::{
     filesystem::block::{
         BlockDevice, BlockDeviceError, BlockDeviceIo,
         nvme::{
-            commands::ReadCommand,
+            commands::{ReadCommand, WriteCommand},
             queue::{Io, QueuePair},
         },
     },
@@ -33,22 +33,13 @@ impl BlockDevice for NvmeNamespace {
 
 impl BlockDeviceIo for NvmeNamespace {
     async fn read(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), BlockDeviceError> {
-        let block_size = self.block_size() as u64;
-        let count = buf.len() as u64 / block_size;
-
-        if lba + count > self.block_count() {
-            return Err(BlockDeviceError::InvalidRange { lba, count });
-        }
-
-        if buf.len() as u64 % block_size != 0 {
-            return Err(BlockDeviceError::NotAligned);
-        }
-
-        let dma = alloc_dma_region(count * block_size);
+        let count = self.validate_range(lba, buf.len())?;
+        let dma = alloc_dma_region(count * self.block_size() as u64);
 
         let future = {
             let mut queue = self.queue.lock();
             queue.submit(ReadCommand {
+                nsid: self.nsid,
                 prp: dma.phys().as_u64(),
                 slba: lba,
                 cdw12: count as u32,
@@ -68,7 +59,29 @@ impl BlockDeviceIo for NvmeNamespace {
     }
 
     async fn write(&mut self, lba: u64, buf: &[u8]) -> Result<(), BlockDeviceError> {
-        todo!()
+        let count = self.validate_range(lba, buf.len())?;
+        let dma = alloc_dma_region(count * self.block_size() as u64);
+
+        let dst = unsafe { core::slice::from_raw_parts_mut(dma.virt().as_mut_ptr(), buf.len()) };
+        dst.copy_from_slice(buf);
+
+        let future = {
+            let mut queue = self.queue.lock();
+            queue.submit(WriteCommand {
+                nsid: self.nsid,
+                prp: dma.phys().as_u64(),
+                slba: lba,
+                cdw12: count as u32,
+                dsm: 0,
+            })
+        };
+
+        let entry = future.await;
+        if !entry.status.is_success() {
+            return Err(BlockDeviceError::IoError);
+        }
+
+        Ok(())
     }
 
     async fn flush(&mut self) -> Result<(), BlockDeviceError> {

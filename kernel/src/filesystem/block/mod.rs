@@ -53,6 +53,22 @@ pub trait BlockDevice: Send + Sync {
     fn capacity(&self) -> u64 {
         self.block_size() as u64 * self.block_count()
     }
+
+    fn validate_range(&self, lba: u64, buf_len: usize) -> Result<u64, BlockDeviceError> {
+        let block_size = self.block_size() as u64;
+
+        if buf_len as u64 % block_size != 0 {
+            return Err(BlockDeviceError::NotAligned);
+        }
+
+        let count = buf_len as u64 / block_size;
+
+        if lba + count > self.block_count() {
+            return Err(BlockDeviceError::InvalidRange { lba, count });
+        }
+
+        Ok(count)
+    }
 }
 
 pub trait BlockDeviceIo: BlockDevice {
