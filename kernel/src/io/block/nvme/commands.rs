@@ -1,4 +1,4 @@
-use crate::filesystem::block::nvme::{queue::SQEntry, spec};
+use crate::io::block::nvme::{queue::SQEntry, spec};
 
 pub trait NvmeCommand {
     const OPCODE: u32;

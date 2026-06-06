@@ -1,9 +1,7 @@
 use alloc::{sync::Arc, vec::Vec};
 use spin::Mutex;
 
-use crate::{filesystem::block::nvme::NvmeController, io::pci::PciDevice};
-
-pub mod block;
+use crate::{io::block::nvme::NvmeController, io::pci::PciDevice};
 
 pub fn init() {
     let devices = {

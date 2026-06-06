@@ -13,7 +13,7 @@ use spin::Mutex;
 
 use crate::{
     allocator::mmio::MappedRegion,
-    filesystem::block::nvme::{NvmeController, commands::NvmeCommand},
+    io::block::nvme::{NvmeController, commands::NvmeCommand},
     sys::interrupts::IrqResult,
 };
 

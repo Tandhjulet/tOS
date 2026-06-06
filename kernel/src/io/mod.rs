@@ -1,3 +1,4 @@
+pub mod block;
 pub mod frame_buffer;
 pub mod logger;
 pub mod net;

@@ -3,7 +3,7 @@ use spin::Mutex;
 
 use crate::{
     allocator::mmio::alloc_dma_region,
-    filesystem::block::{
+    io::block::{
         BlockDevice, BlockDeviceError, BlockDeviceIo,
         nvme::{
             commands::{FlushCommand, ReadCommand, WriteCommand},

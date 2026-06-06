@@ -6,7 +6,7 @@ use spin::Mutex;
 
 use crate::{
     allocator::mmio::{PAGE_SIZE, alloc_dma_region},
-    filesystem::block::{
+    io::block::{
         BlockDevice, DeviceId, REGISTRY,
         nvme::{
             commands::{
