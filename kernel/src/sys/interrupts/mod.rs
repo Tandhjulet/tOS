@@ -161,8 +161,8 @@ pub static HANDLERS: Mutex<Vec<Option<Box<dyn Fn() -> IrqResult + Send>>>> = Mut
 pub fn init_handlers() {
     let mut h = HANDLERS.lock();
     let curr_len = h.len();
-    h.reserve_exact(256 - 32 - curr_len);
-    h.extend((0..256 - 32).map(|_| None));
+    h.reserve_exact(256 - MIN_INTERRUPT - curr_len);
+    h.extend((0..256 - MIN_INTERRUPT).map(|_| None));
 }
 
 lazy_static! {
