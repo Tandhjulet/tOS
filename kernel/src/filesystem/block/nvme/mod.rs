@@ -1,10 +1,6 @@
-use core::{
-    cmp::min,
-    ptr::{read_volatile, write_volatile},
-    sync::atomic::AtomicUsize,
-};
+use core::{cmp::min, sync::atomic::AtomicUsize};
 
-use alloc::{boxed::Box, format, sync::Arc, vec::Vec};
+use alloc::{boxed::Box, format, sync::Arc, sync::Weak, vec::Vec};
 use log::error;
 use spin::Mutex;
 
@@ -42,7 +38,7 @@ pub struct NvmeController {
     adm_queue: Option<QueuePair>,
     adm_buf: MappedRegion,
 
-    queues: Vec<QueuePair>,
+    pub queues: Vec<Arc<Mutex<QueuePair>>>,
 }
 
 impl NvmeController {
@@ -94,9 +90,17 @@ impl NvmeController {
         let namespaces: Vec<NvmeNamespace> = {
             let mut controller = this.lock();
             controller.reset_and_disable();
+
+            let weak = Arc::downgrade(this);
+            let admin_queues = controller.create_admin_queues(Weak::clone(&weak));
+            controller.adm_queue = Some(admin_queues);
+
             let mut cfg = controller.configure();
             controller.enable(&mut cfg);
             controller.run_identify_seq(&mut cfg);
+
+            let queue_cnt = controller.init_queue_cnt() as u32;
+            controller.create_io_queues(queue_cnt, weak);
 
             let namespaces = controller.enumerate_namespaces();
             namespaces
@@ -104,10 +108,8 @@ impl NvmeController {
 
         {
             let mut controller = this.lock();
-            let queue_cnt = controller.init_queue_cnt() as u32;
-
-            controller.setup_interrupts(this, queue_cnt);
-            controller.create_io_queues(queue_cnt);
+            let queue_cnt = controller.queues.len();
+            controller.setup_interrupts(this, queue_cnt as u32);
         };
 
         let mut registry = REGISTRY.lock();
@@ -122,13 +124,13 @@ impl NvmeController {
         }
     }
 
-    fn create_io_queues(&mut self, queue_cnt: u32) {
+    fn create_io_queues(&mut self, queue_cnt: u32, controller: Weak<Mutex<NvmeController>>) {
         let slots_needed = queue_cnt as usize - self.queues.len();
         self.queues.reserve_exact(slots_needed);
 
         const ENTRY_COUNT: usize = PAGE_SIZE as usize / size_of::<SQEntry>();
         for i in 0..queue_cnt as u16 {
-            let pair = self.create_queue_pair(ENTRY_COUNT, i + 1);
+            let pair = self.create_queue_pair(ENTRY_COUNT, i + 1, Weak::clone(&controller));
             self.queues.push(pair);
         }
     }
@@ -155,6 +157,7 @@ impl NvmeController {
             features.cdw11 = selected_cmd_idx as u32;
         });
 
+        let mut ns_idx = 0;
         for csi in cmd_set.csi_iter(selected_cmd_idx) {
             let nsids = self.identify_read::<IdentifyNamespaceList>(
                 spec::op::identify::CNS_ACTIVE_NS_CMD_SET,
@@ -167,15 +170,22 @@ impl NvmeController {
             );
 
             for &nsid in nsids.valid() {
-                let namespace = self.build_namespace(nsid, csi);
-                namespaces.push(namespace);
+                let queue = Arc::clone(&self.queues[ns_idx % self.queues.len()]);
+                namespaces.push(self.build_namespace(nsid, csi, queue));
+
+                ns_idx += 1;
             }
         }
 
         namespaces
     }
 
-    fn build_namespace(&mut self, nsid: u32, csi: u8) -> NvmeNamespace {
+    fn build_namespace(
+        &mut self,
+        nsid: u32,
+        csi: u8,
+        queue: Arc<Mutex<QueuePair>>,
+    ) -> NvmeNamespace {
         let command_set = match csi {
             spec::csi::NVM => {
                 let identify = self.identify_read::<IdentifyNamespaceNvm>(
@@ -209,7 +219,7 @@ impl NvmeController {
         );
 
         NvmeNamespace {
-            controller: self,
+            queue,
             nsid,
             command_set,
             independent,
@@ -223,9 +233,6 @@ impl NvmeController {
 
         // wait for controller to disable
         while (unsafe { self.read_reg(spec::CSTS) } & 0x1) == 1 {}
-
-        let admin_queues = self.create_admin_queues();
-        self.adm_queue = Some(admin_queues);
     }
 
     fn configure(&mut self) -> ControllerConfig {
@@ -284,6 +291,7 @@ impl NvmeController {
         entry.cdw11 = PHYS_CONTIG | ((comp_id as u32) << 16);
 
         let res = self.submit_admin_command(entry);
+
         if !res.status.is_success() {
             panic!(
                 "NVMe: Received status: {} whilst setting up I/O submission queue",
@@ -333,11 +341,27 @@ impl NvmeController {
         queue
     }
 
-    pub fn create_queue_pair(&mut self, entry_count: usize, id: u16) -> QueuePair {
+    pub fn submit_admin_command(&mut self, command: SQEntry) -> CQEntry {
+        self.adm_queue
+            .as_mut()
+            .expect("Admin queues should be initialized")
+            .submit_polled(command)
+    }
+
+    pub fn create_queue_pair(
+        &mut self,
+        entry_count: usize,
+        id: u16,
+        controller: Weak<Mutex<NvmeController>>,
+    ) -> Arc<Mutex<QueuePair>> {
         let comp = self.create_io_comp_queue(entry_count, id, id as u32);
         let subm = self.create_io_subm_queue(entry_count, id, id);
 
-        QueuePair { subm, comp }
+        Arc::new(Mutex::new(QueuePair {
+            controller,
+            subm,
+            comp,
+        }))
     }
 
     fn init_queue_cnt(&mut self) -> u16 {
@@ -458,7 +482,7 @@ impl NvmeController {
         unsafe { bar.read32(offset) }
     }
 
-    fn create_admin_queues(&self) -> QueuePair {
+    fn create_admin_queues(&self, controller: Weak<Mutex<NvmeController>>) -> QueuePair {
         let binding = self.device.lock();
         let Some(bar) = PciDevice::get_bar(&binding, 0) else {
             panic!("Could not find BAR0 for NVMe!");
@@ -486,6 +510,7 @@ impl NvmeController {
         }
 
         QueuePair {
+            controller,
             subm: asq,
             comp: acq,
         }

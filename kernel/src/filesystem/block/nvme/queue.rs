@@ -4,7 +4,8 @@ use core::{
     ptr::{read_volatile, write_volatile},
 };
 
-use alloc::sync::Arc;
+use alloc::{sync::Arc, sync::Weak};
+use spin::Mutex;
 
 use crate::{allocator::mmio::MappedRegion, filesystem::block::nvme::NvmeController};
 
@@ -39,7 +40,7 @@ impl Default for RingQueueState {
 }
 
 pub struct QueuePair {
-    pub controller: Arc<NvmeController>,
+    pub controller: Weak<Mutex<NvmeController>>,
     pub subm: Queue<Submission>,
     pub comp: Queue<Completion>,
 }

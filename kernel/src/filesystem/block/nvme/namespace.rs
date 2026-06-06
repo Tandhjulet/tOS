@@ -1,9 +1,10 @@
 use alloc::{string::String, sync::Arc};
+use spin::Mutex;
 
-use crate::filesystem::block::{StorageDevice, nvme::NvmeController};
+use crate::filesystem::block::{StorageDevice, nvme::queue::QueuePair};
 
 pub struct NvmeNamespace {
-    pub controller: Arc<NvmeController>,
+    pub queue: Arc<Mutex<QueuePair>>,
     pub nsid: u32,
     pub command_set: NvmeCommandSet,
 
