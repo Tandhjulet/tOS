@@ -6,7 +6,7 @@ use crate::{
     filesystem::block::{
         BlockDevice, BlockDeviceError, BlockDeviceIo,
         nvme::{
-            commands::{ReadCommand, WriteCommand},
+            commands::{FlushCommand, ReadCommand, WriteCommand},
             queue::{Io, QueuePair},
         },
     },
@@ -85,7 +85,17 @@ impl BlockDeviceIo for NvmeNamespace {
     }
 
     async fn flush(&mut self) -> Result<(), BlockDeviceError> {
-        todo!()
+        let future = {
+            let mut queue = self.queue.lock();
+            queue.submit(FlushCommand { nsid: self.nsid })
+        };
+
+        let entry = future.await;
+        if !entry.status.is_success() {
+            return Err(BlockDeviceError::IoError);
+        }
+
+        Ok(())
     }
 }
 

@@ -113,6 +113,18 @@ impl NvmeCommand for WriteCommand {
     }
 }
 
+pub struct FlushCommand {
+    pub nsid: u32,
+}
+
+impl NvmeCommand for FlushCommand {
+    const OPCODE: u32 = spec::op::FLUSH;
+
+    fn configure(self, entry: &mut SQEntry) {
+        entry.nsid = self.nsid;
+    }
+}
+
 pub struct ControllerConfig(pub u32);
 
 impl ControllerConfig {
