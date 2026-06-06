@@ -2,9 +2,13 @@ use core::{
     fmt::Display,
     marker::PhantomData,
     ptr::{read_volatile, write_volatile},
+    task::{Poll, Waker},
 };
 
-use alloc::sync::Weak;
+use alloc::{
+    collections::btree_map::BTreeMap,
+    sync::{Arc, Weak},
+};
 use spin::Mutex;
 
 use crate::{
@@ -61,10 +65,43 @@ impl Default for RingQueueState {
     }
 }
 
+pub struct PendingCommand {
+    pub waker: Option<Waker>,
+    pub result: Option<CQEntry>,
+}
+
+pub struct NvmeFuture {
+    pub id: u16,
+    pub pending: Arc<Mutex<BTreeMap<u16, PendingCommand>>>,
+}
+
+impl Future for NvmeFuture {
+    type Output = CQEntry;
+
+    fn poll(
+        self: core::pin::Pin<&mut Self>,
+        cx: &mut core::task::Context<'_>,
+    ) -> core::task::Poll<Self::Output> {
+        let mut pending = self.pending.lock();
+        let command = pending.get_mut(&self.id).unwrap();
+        if let Some(result) = command.result.take() {
+            pending.remove(&self.id);
+            Poll::Ready(result)
+        } else {
+            command.waker = Some(cx.waker().clone());
+            Poll::Pending
+        }
+    }
+}
+
 pub trait QueuePairKind {
     fn submit_async(pair: &mut QueuePair<Self>, command: SQEntry) -> impl Future<Output = CQEntry>
     where
         Self: Sized;
+}
+
+pub struct Io {
+    pub pending: Arc<Mutex<BTreeMap<u16, PendingCommand>>>,
 }
 
 pub struct Admin {
@@ -72,18 +109,6 @@ pub struct Admin {
 }
 
 impl Admin {
-    pub fn submit_cmd(pair: &mut QueuePair<Self>, command: SQEntry) {
-        let slot =
-            pair.subm.virt().unwrap() + (pair.subm.state.tail as u64 * size_of::<SQEntry>() as u64);
-        unsafe { write_volatile(slot as *mut SQEntry, command) }
-
-        pair.subm.state.tail = (pair.subm.state.tail + 1) % pair.subm.state.size as u16;
-        let tail = pair.subm.state.tail;
-
-        let doorbell = pair.subm.doorbell;
-        unsafe { pair.write_reg(doorbell, tail as u32) }
-    }
-
     pub fn next_completion(pair: &mut QueuePair<Self>) -> CQEntry {
         let (slot, phase) = {
             let cq = &pair.comp;
@@ -116,12 +141,10 @@ impl Admin {
     }
 
     pub fn submit_polled(pair: &mut QueuePair<Self>, command: SQEntry) -> CQEntry {
-        Self::submit_cmd(pair, command);
+        pair.submit_cmd(command);
         Self::next_completion(pair)
     }
 }
-
-pub struct Io;
 
 impl QueuePairKind for Admin {
     fn submit_async(pair: &mut QueuePair<Self>, command: SQEntry) -> impl Future<Output = CQEntry>
@@ -138,7 +161,20 @@ impl QueuePairKind for Io {
     where
         Self: Sized,
     {
-        todo!()
+        let id = pair.subm.state.tail;
+        pair.kind.pending.lock().insert(
+            id,
+            PendingCommand {
+                waker: None,
+                result: None,
+            },
+        );
+        pair.submit_cmd(command);
+
+        NvmeFuture {
+            id,
+            pending: Arc::clone(&pair.kind.pending),
+        }
     }
 }
 
@@ -152,7 +188,9 @@ impl QueuePair<Io> {
             controller,
             subm,
             comp,
-            kind: Io,
+            kind: Io {
+                pending: Arc::new(Mutex::new(BTreeMap::new())),
+            },
         }
     }
 }
@@ -202,6 +240,18 @@ impl<K: QueuePairKind> QueuePair<K> {
 
     pub fn submit<C: NvmeCommand>(&mut self, command: C) -> impl Future<Output = CQEntry> {
         K::submit_async(self, Self::build_entry(command))
+    }
+
+    fn submit_cmd(&mut self, command: SQEntry) {
+        let slot =
+            self.subm.virt().unwrap() + (self.subm.state.tail as u64 * size_of::<SQEntry>() as u64);
+        unsafe { write_volatile(slot as *mut SQEntry, command) }
+
+        self.subm.state.tail = (self.subm.state.tail + 1) % self.subm.state.size as u16;
+        let tail = self.subm.state.tail;
+
+        let doorbell = self.subm.doorbell;
+        unsafe { self.write_reg(doorbell, tail as u32) }
     }
 
     unsafe fn write_reg(&mut self, offset: u32, val: u32) {
