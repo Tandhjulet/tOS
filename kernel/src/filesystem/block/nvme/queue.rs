@@ -4,28 +4,47 @@ use core::{
     ptr::{read_volatile, write_volatile},
 };
 
-use alloc::{sync::Arc, sync::Weak};
+use alloc::sync::Weak;
 use spin::Mutex;
 
 use crate::{allocator::mmio::MappedRegion, filesystem::block::nvme::NvmeController};
 
-pub trait QueueKind {}
+pub trait QueueKind {
+    fn doorbell(queue_id: u16, dstrd: u8) -> u32;
+}
 
 #[derive(Default)]
 pub struct Submission;
+
 #[derive(Default)]
 pub struct Completion;
 
-impl QueueKind for Submission {}
-impl QueueKind for Completion {}
+impl QueueKind for Submission {
+    fn doorbell(queue_id: u16, dstrd: u8) -> u32 {
+        0x1000 + (2 * queue_id as u32) * (4 << dstrd as u32)
+    }
+}
+impl QueueKind for Completion {
+    fn doorbell(queue_id: u16, dstrd: u8) -> u32 {
+        0x1000 + (2 * queue_id as u32 + 1) * (4 << dstrd as u32)
+    }
+}
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct RingQueueState {
     pub size: u64,
 
     pub tail: u16,
     pub head: u16,
     pub phase: bool,
+}
+
+impl RingQueueState {
+    pub fn new(size: u64) -> Self {
+        let mut state = RingQueueState::default();
+        state.size = size;
+        state
+    }
 }
 
 impl Default for RingQueueState {
@@ -61,10 +80,8 @@ impl QueuePair {
         self.subm.state.tail = (self.subm.state.tail + 1) % self.subm.state.size as u16;
         let tail = self.subm.state.tail;
 
-        let doorbell = self.controller.sq_doorbell(self.subm.id);
-        unsafe {
-            self.controller.write_reg(doorbell, tail as u32);
-        };
+        let doorbell = self.subm.doorbell;
+        unsafe { self.write_reg(doorbell, tail as u32) }
     }
 
     pub fn next_completion(&mut self) -> CQEntry {
@@ -81,7 +98,6 @@ impl QueuePair {
             }
         };
 
-        let doorbell = self.controller.cq_doorbell(self.comp.id);
         let new_head = {
             let cq = &mut self.comp;
             cq.state.head += 1;
@@ -93,21 +109,45 @@ impl QueuePair {
             cq.state.head
         };
 
-        unsafe { self.controller.write_reg(doorbell, new_head as u32) };
+        let doorbell = self.comp.doorbell;
+        unsafe { self.write_reg(doorbell, new_head as u32) }
 
         entry
     }
+
+    unsafe fn write_reg(&mut self, offset: u32, val: u32) {
+        if let Some(controller) = self.controller.upgrade() {
+            unsafe { controller.lock().write_reg(offset, val) }
+        }
+    }
 }
 
-#[derive(Default)]
 pub struct Queue<K: QueueKind> {
     pub id: u16,
     pub region: Option<MappedRegion>,
     pub state: RingQueueState,
+    pub doorbell: u32,
     _phantom: PhantomData<K>,
 }
 
 impl<K: QueueKind> Queue<K> {
+    pub fn new(
+        id: u16,
+        region: Option<MappedRegion>,
+        state: RingQueueState,
+        dstrd: u8,
+    ) -> Queue<K> {
+        let doorbell = K::doorbell(id, dstrd);
+
+        Queue {
+            id,
+            region,
+            state,
+            doorbell,
+            _phantom: PhantomData,
+        }
+    }
+
     pub fn phys(&self) -> Option<u64> {
         self.region.as_ref().map(|r| r.phys().as_u64())
     }

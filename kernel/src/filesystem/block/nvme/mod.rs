@@ -13,7 +13,7 @@ use crate::{
                 IdentifyNamespaceIndependent, IdentifyNamespaceList, IdentifyNamespaceNvm,
                 IdentifyNamespaceSpecificNvm, NvmNamespaceData, NvmeCommandSet, NvmeNamespace,
             },
-            queue::{CQEntry, Completion, Queue, QueuePair, SQEntry, Submission},
+            queue::{CQEntry, Completion, Queue, QueuePair, RingQueueState, SQEntry, Submission},
         },
     },
     io::pci::{PciDevice, bar::Bar},
@@ -299,11 +299,12 @@ impl NvmeController {
             );
         }
 
-        let mut queue = Queue::default();
-        queue.region = Some(pages);
-        queue.state.size = max_entries as u64;
-
-        queue
+        Queue::new(
+            id,
+            Some(pages),
+            RingQueueState::new(max_entries as u64),
+            self.cap.dstrd(),
+        )
     }
 
     pub fn create_io_comp_queue(
@@ -333,12 +334,12 @@ impl NvmeController {
             );
         }
 
-        let mut queue = Queue::default();
-        queue.region = Some(pages);
-        queue.state.size = max_entries as u64;
-        queue.id = id;
-
-        queue
+        Queue::new(
+            id,
+            Some(pages),
+            RingQueueState::new(max_entries as u64),
+            self.cap.dstrd(),
+        )
     }
 
     pub fn submit_admin_command(&mut self, command: SQEntry) -> CQEntry {
@@ -488,18 +489,22 @@ impl NvmeController {
             panic!("Could not find BAR0 for NVMe!");
         };
 
-        let mut asq = Queue::default();
-        let mut acq = Queue::default();
+        const ADM_QUEUE_ID: u16 = 0;
+        const RING_QUEUE_SIZE: u64 = 63;
+        let dstrd = self.cap.dstrd();
 
-        asq.region = Some(alloc_dma_region(PAGE_SIZE));
-        acq.region = Some(alloc_dma_region(PAGE_SIZE));
-
-        asq.state.size = 63;
-        acq.state.size = 63;
-
-        // admin queues have id 0
-        asq.id = 0;
-        acq.id = 0;
+        let asq = Queue::new(
+            ADM_QUEUE_ID,
+            Some(alloc_dma_region(PAGE_SIZE)),
+            RingQueueState::new(RING_QUEUE_SIZE),
+            dstrd,
+        );
+        let acq = Queue::new(
+            ADM_QUEUE_ID,
+            Some(alloc_dma_region(PAGE_SIZE)),
+            RingQueueState::new(RING_QUEUE_SIZE),
+            dstrd,
+        );
 
         let aqa = ((acq.state.size as u32) << 16) | (asq.state.size as u32);
         unsafe { bar.write32(spec::AQA, aqa) };
@@ -514,14 +519,6 @@ impl NvmeController {
             subm: asq,
             comp: acq,
         }
-    }
-
-    fn sq_doorbell(&self, queue_id: u16) -> u32 {
-        0x1000 + (2 * queue_id as u32) * (4 << self.cap.dstrd() as u32)
-    }
-
-    fn cq_doorbell(&self, queue_id: u16) -> u32 {
-        0x1000 + (2 * queue_id as u32 + 1) * (4 << self.cap.dstrd() as u32)
     }
 }
 
