@@ -14,6 +14,7 @@ use spin::Mutex;
 use crate::{
     allocator::mmio::MappedRegion,
     filesystem::block::nvme::{NvmeController, commands::NvmeCommand},
+    sys::interrupts::IrqResult,
 };
 
 pub trait QueueKind {
@@ -110,34 +111,11 @@ pub struct Admin {
 
 impl Admin {
     pub fn next_completion(pair: &mut QueuePair<Self>) -> CQEntry {
-        let (slot, phase) = {
-            let cq = &pair.comp;
-            let slot = cq.virt().unwrap() + (cq.state.head as u64 * size_of::<CQEntry>() as u64);
-            (slot, cq.state.phase)
-        };
-
-        let entry = loop {
-            let entry = unsafe { read_volatile(slot as *const CQEntry) };
-            if entry.status.phase_tag() == phase {
-                break entry;
+        loop {
+            if let Some(entry) = pair.try_complete() {
+                return entry;
             }
-        };
-
-        let new_head = {
-            let cq = &mut pair.comp;
-            cq.state.head += 1;
-            if cq.state.head > cq.state.size as u16 {
-                cq.state.head = 0;
-                cq.state.phase = !cq.state.phase; // flip phase on wraparound
-            }
-
-            cq.state.head
-        };
-
-        let doorbell = pair.comp.doorbell;
-        unsafe { pair.write_reg(doorbell, new_head as u32) }
-
-        entry
+        }
     }
 
     pub fn submit_polled(pair: &mut QueuePair<Self>, command: SQEntry) -> CQEntry {
@@ -192,6 +170,23 @@ impl QueuePair<Io> {
                 pending: Arc::new(Mutex::new(BTreeMap::new())),
             },
         }
+    }
+
+    pub fn handle_incomming(&mut self) -> IrqResult {
+        let entry = self
+            .try_complete()
+            .expect("completion entry should be ready");
+
+        let id = entry.cid;
+        let mut pending = self.kind.pending.lock();
+        if let Some(command) = pending.get_mut(&id) {
+            command.result = Some(entry);
+            if let Some(waker) = command.waker.take() {
+                waker.wake();
+            }
+        }
+
+        IrqResult::EoiNeeded
     }
 }
 
@@ -252,6 +247,32 @@ impl<K: QueuePairKind> QueuePair<K> {
 
         let doorbell = self.subm.doorbell;
         unsafe { self.write_reg(doorbell, tail as u32) }
+    }
+
+    pub fn try_complete(&mut self) -> Option<CQEntry> {
+        let cq = &self.comp;
+        let slot = cq.virt().unwrap() + (cq.state.head as u64 * size_of::<CQEntry>() as u64);
+        let entry = unsafe { read_volatile(slot as *const CQEntry) };
+
+        if entry.status.phase_tag() != cq.state.phase {
+            return None;
+        }
+
+        let new_head = {
+            let cq = &mut self.comp;
+            cq.state.head += 1;
+            if cq.state.head > cq.state.size as u16 {
+                cq.state.head = 0;
+                cq.state.phase = !cq.state.phase; // flip phase on wraparound
+            }
+
+            cq.state.head
+        };
+
+        let doorbell = self.comp.doorbell;
+        unsafe { self.write_reg(doorbell, new_head as u32) }
+
+        Some(entry)
     }
 
     unsafe fn write_reg(&mut self, offset: u32, val: u32) {

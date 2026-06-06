@@ -116,7 +116,7 @@ impl NvmeController {
         {
             let mut controller = this.lock();
             let queue_cnt = controller.queues.len();
-            controller.setup_interrupts(this, queue_cnt as u32);
+            controller.setup_interrupts(queue_cnt as u32);
         };
 
         let mut registry = REGISTRY.lock();
@@ -428,20 +428,20 @@ impl NvmeController {
         min(io_comp_queues, io_subm_queues).min(spec::IO_QUEUES)
     }
 
-    pub fn nvme_int_handler(&self) -> IrqResult {
+    pub fn interrupt_handler(&self) -> IrqResult {
         println!("IRQ!");
         IrqResult::EoiNeeded
     }
 
-    fn setup_interrupts(&mut self, self_ref: &Arc<Mutex<Self>>, queue_cnt: u32) {
+    fn setup_interrupts(&mut self, queue_cnt: u32) {
         match self.setup_pci_interrupt_mode() {
-            InterruptMode::MsiX => self.setup_msix_interrupts(self_ref, queue_cnt),
+            InterruptMode::MsiX => self.setup_msix_interrupts(queue_cnt),
             InterruptMode::Msi => todo!(),
             InterruptMode::Legacy => todo!(),
         }
     }
 
-    fn setup_msix_interrupts(&self, self_ref: &Arc<Mutex<Self>>, queue_cnt: u32) {
+    fn setup_msix_interrupts(&self, queue_cnt: u32) {
         let cpu_id = match &*INTERRUPT_CONTROLLER.get() {
             InterruptControllerType::Apic(apic_info) => apic_info.lapic.id(),
             _ => panic!("Using MSI-X, the interrupt controller should always be APIC!"),
@@ -453,10 +453,10 @@ impl NvmeController {
             .expect("MSI-X tables should be present as MSI-X is enabled");
 
         for i in 0..queue_cnt as usize {
-            let weak = Arc::downgrade(&self_ref);
+            let queue = Arc::downgrade(&self.queues[i]);
             let vector = interrupts::allocate_interrupt(Box::new(move || {
-                if let Some(ctrlr) = weak.upgrade() {
-                    ctrlr.lock().nvme_int_handler()
+                if let Some(queue) = queue.upgrade() {
+                    queue.lock().handle_incomming()
                 } else {
                     IrqResult::EoiNeeded
                 }
