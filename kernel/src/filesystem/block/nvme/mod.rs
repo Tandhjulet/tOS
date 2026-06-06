@@ -5,10 +5,14 @@ use log::error;
 use spin::Mutex;
 
 use crate::{
-    allocator::mmio::{MappedRegion, PAGE_SIZE, alloc_dma_region},
+    allocator::mmio::{PAGE_SIZE, alloc_dma_region},
     filesystem::block::{
         DeviceId, REGISTRY,
         nvme::{
+            commands::{
+                CreateCompletionQueueCommand, CreateSubmissionQueueCommand, IdentifyCommand,
+                NvmeCommand, SetFeaturesCommand,
+            },
             namespace::{
                 IdentifyNamespaceIndependent, IdentifyNamespaceList, IdentifyNamespaceNvm,
                 IdentifyNamespaceSpecificNvm, NvmNamespaceData, NvmeCommandSet, NvmeNamespace,
@@ -26,6 +30,7 @@ use crate::{
     },
 };
 
+pub mod commands;
 pub mod namespace;
 pub mod queue;
 pub mod spec;
@@ -39,7 +44,6 @@ pub struct NvmeController {
     identify_ctlr: Option<IdentifyController>,
 
     adm_queue: Option<QueuePair<Admin>>,
-    adm_buf: MappedRegion,
 
     pub queues: Vec<Arc<Mutex<QueuePair<Io>>>>,
 }
@@ -63,7 +67,6 @@ impl NvmeController {
                 identify_ctlr: None,
                 adm_queue: None,
                 queues: Vec::new(),
-                adm_buf: alloc_dma_region(PAGE_SIZE),
             }
         };
 
@@ -139,8 +142,16 @@ impl NvmeController {
     }
 
     fn run_identify_seq(&mut self, cfg: &mut ControllerConfig) {
-        let identify_ctrlr =
-            self.identify_read::<IdentifyController>(spec::op::identify::CNS_CONTROLLER, |_| {});
+        let buffer = unsafe { self.admin_queue() }.buffer().phys().as_u64();
+        let identify_ctrlr = unsafe {
+            self.submit_read_admin_command::<IdentifyController>(IdentifyCommand {
+                cns: spec::op::identify::CNS_CONTROLLER,
+                prp: buffer,
+                nsid: 0,
+                cdw11: 0,
+            })
+        };
+
         self.identify_ctlr = Some(identify_ctrlr);
 
         if cfg.css() == 0 {
@@ -150,27 +161,39 @@ impl NvmeController {
 
     fn enumerate_namespaces(&mut self) -> Vec<NvmeNamespace> {
         let mut namespaces = Vec::new();
-        let cmd_set =
-            self.identify_read::<IdentifyCommandSet>(spec::op::identify::CNS_CMD_SET, |_| {});
+
+        let buffer = unsafe { self.admin_queue() }.buffer().phys().as_u64();
+        let cmd_set = unsafe {
+            self.submit_read_admin_command::<IdentifyCommandSet>(IdentifyCommand {
+                cns: spec::op::identify::CNS_CMD_SET,
+                prp: buffer,
+                cdw11: 0,
+                nsid: 0,
+            })
+        };
+
         let selected_cmd_idx = cmd_set.first_valid().unwrap();
 
         // Refer to section 5.27.1.21 for documentation regarding
         // I/O Command Set Profile (FID: 0x19)
-        self.set_features(spec::op::features::FID_SET_PROFILE, |features| {
-            features.cdw11 = selected_cmd_idx as u32;
-        });
+        unsafe {
+            self.submit_admin_command(SetFeaturesCommand {
+                fid: spec::op::features::FID_SET_PROFILE,
+                cdw11: selected_cmd_idx as u32,
+                prp: buffer,
+            })
+        };
 
         let mut ns_idx = 0;
         for csi in cmd_set.csi_iter(selected_cmd_idx) {
-            let nsids = self.identify_read::<IdentifyNamespaceList>(
-                spec::op::identify::CNS_ACTIVE_NS_CMD_SET,
-                |identify| {
-                    identify.nsid = 0;
-
-                    // See figure 271
-                    identify.cdw11 = (csi as u32) << 24;
-                },
-            );
+            let nsids = unsafe {
+                self.submit_read_admin_command::<IdentifyNamespaceList>(IdentifyCommand {
+                    cns: spec::op::identify::CNS_ACTIVE_NS_CMD_SET,
+                    prp: buffer,
+                    cdw11: (csi as u32) << 24,
+                    nsid: 0,
+                })
+            };
 
             for &nsid in nsids.valid() {
                 let queue = Arc::clone(&self.queues[ns_idx % self.queues.len()]);
@@ -189,37 +212,52 @@ impl NvmeController {
         csi: u8,
         queue: Arc<Mutex<QueuePair<Io>>>,
     ) -> NvmeNamespace {
+        let buffer = unsafe { self.admin_queue() }.buffer().phys().as_u64();
+
         let command_set = match csi {
             spec::csi::NVM => {
-                let identify = self.identify_read::<IdentifyNamespaceNvm>(
-                    spec::op::identify::CNS_NAMESPACE,
-                    |cmd| {
-                        cmd.nsid = nsid;
-                    },
-                );
-                let specific = self.identify_read::<IdentifyNamespaceSpecificNvm>(
-                    spec::op::identify::CNS_SPECIFIC_NS,
-                    |cmd| {
-                        cmd.nsid = nsid;
-                        cmd.cdw11 = (csi as u32) << 24;
-                    },
-                );
+                let identify = unsafe {
+                    self.submit_read_admin_command::<IdentifyNamespaceNvm>(IdentifyCommand {
+                        cns: spec::op::identify::CNS_NAMESPACE,
+                        prp: buffer,
+                        cdw11: 0,
+                        nsid: nsid,
+                    })
+                };
+
+                let specific = unsafe {
+                    self.submit_read_admin_command::<IdentifyNamespaceSpecificNvm>(
+                        IdentifyCommand {
+                            cns: spec::op::identify::CNS_SPECIFIC_NS,
+                            prp: buffer,
+                            nsid: nsid,
+                            cdw11: (csi as u32) << 24,
+                        },
+                    )
+                };
 
                 NvmeCommandSet::Nvm(NvmNamespaceData { identify, specific })
             }
             _ => todo!(),
         };
 
-        self.identify(spec::op::identify::CNS_SPECIFIC_CTRLR, |cmd| {
-            cmd.cdw11 = (csi as u32) << 24;
-        });
+        unsafe {
+            self.submit_admin_command(IdentifyCommand {
+                cns: spec::op::identify::CNS_SPECIFIC_CTRLR,
+                nsid: 0,
+                prp: buffer,
+                cdw11: (csi as u32) << 24,
+            })
+        };
 
-        let independent = self.identify_read::<IdentifyNamespaceIndependent>(
-            spec::op::identify::CNS_NAMESPACE_INDEPENDENT,
-            |cmd| {
-                cmd.nsid = nsid;
-            },
-        );
+        let independent = unsafe {
+            self.submit_read_admin_command::<IdentifyNamespaceIndependent>(IdentifyCommand {
+                cns: spec::op::identify::CNS_NAMESPACE_INDEPENDENT,
+                nsid: nsid,
+                prp: buffer,
+                cdw11: 0,
+            })
+        };
 
         NvmeNamespace {
             queue,
@@ -281,19 +319,18 @@ impl NvmeController {
         id: u16,
         comp_id: u16,
     ) -> Queue<Submission> {
+        const PHYS_CONTIG: u32 = 1;
+
         let size = max_entries * size_of::<SQEntry>();
         let pages = alloc_dma_region(size as u64);
 
-        let mut entry = SQEntry::default();
-        entry.cdw0 = spec::op::CRT_SUBQ | (1 << 16);
-        entry.prp1 = pages.phys().as_u64();
-
-        entry.cdw10 = (id as u32) | ((max_entries as u32 - 1) << 16);
-
-        const PHYS_CONTIG: u32 = 1;
-        entry.cdw11 = PHYS_CONTIG | ((comp_id as u32) << 16);
-
-        let res = self.submit_admin_command(entry);
+        let res = unsafe {
+            self.submit_admin_command(CreateSubmissionQueueCommand {
+                prp: pages.phys().as_u64(),
+                cdw10: (id as u32) | ((max_entries as u32 - 1) << 16),
+                cdw11: PHYS_CONTIG | ((comp_id as u32) << 16),
+            })
+        };
 
         if !res.status.is_success() {
             panic!(
@@ -316,19 +353,19 @@ impl NvmeController {
         id: u16,
         vec: u32,
     ) -> Queue<Completion> {
+        const COMPQUEUE_ENABLED: u32 = 0x2;
+        const PHYS_CONTIG: u32 = 0x1;
+
         let size = max_entries * size_of::<CQEntry>();
         let pages = alloc_dma_region(size as u64);
 
-        let mut entry = SQEntry::default();
-        entry.cdw0 = spec::op::CRT_CMPQ | (1 << 16);
-        entry.prp1 = pages.phys().as_u64();
-        entry.cdw10 = (id as u32) | ((max_entries as u32 - 1) << 16);
-
-        const COMPQUEUE_ENABLED: u32 = 0x2;
-        const PHYS_CONTIG: u32 = 0x1;
-        entry.cdw11 = PHYS_CONTIG | COMPQUEUE_ENABLED | (vec << 16);
-
-        let res = self.submit_admin_command(entry);
+        let res = unsafe {
+            self.submit_admin_command(CreateCompletionQueueCommand {
+                prp: pages.phys().as_u64(),
+                cdw10: (id as u32) | ((max_entries as u32 - 1) << 16),
+                cdw11: PHYS_CONTIG | COMPQUEUE_ENABLED | (vec << 16),
+            })
+        };
 
         if !res.status.is_success() {
             panic!(
@@ -345,11 +382,21 @@ impl NvmeController {
         )
     }
 
-    pub fn submit_admin_command(&mut self, command: SQEntry) -> CQEntry {
+    unsafe fn admin_queue(&mut self) -> &mut QueuePair<Admin> {
         self.adm_queue
             .as_mut()
             .expect("Admin queues should be initialized")
-            .submit_sync(command)
+    }
+
+    pub unsafe fn submit_admin_command(&mut self, command: impl NvmeCommand) -> CQEntry {
+        unsafe { self.admin_queue() }.submit_sync(command)
+    }
+
+    pub unsafe fn submit_read_admin_command<T: Copy>(&mut self, command: impl NvmeCommand) -> T {
+        unsafe {
+            self.submit_admin_command(command);
+            self.admin_queue().read::<T>()
+        }
     }
 
     pub fn create_queue_pair(
@@ -361,13 +408,18 @@ impl NvmeController {
         let comp = self.create_io_comp_queue(entry_count, id, id as u32);
         let subm = self.create_io_subm_queue(entry_count, id, id);
 
-        Arc::new(Mutex::new(QueuePair::<Io>::new(controller, subm, comp)))
+        Arc::new(Mutex::new(QueuePair::<Io>::new_io(controller, subm, comp)))
     }
 
     fn init_queue_cnt(&mut self) -> u16 {
-        let io_queue_count_raw = self.set_features(spec::op::features::FID_NUM_QUEUES, |cmd| {
-            cmd.cdw11 = ((spec::IO_QUEUES as u32 - 1) << 16) | (spec::IO_QUEUES as u32 - 1);
-        });
+        let buffer = unsafe { self.admin_queue() }.buffer().phys().as_u64();
+        let io_queue_count_raw = unsafe {
+            self.submit_admin_command(SetFeaturesCommand {
+                fid: spec::op::features::FID_NUM_QUEUES,
+                prp: buffer,
+                cdw11: ((spec::IO_QUEUES as u32 - 1) << 16) | (spec::IO_QUEUES as u32 - 1),
+            })
+        };
 
         let io_comp_queues = (io_queue_count_raw.dw0 >> 16) as u16 + 1;
         let io_subm_queues = io_queue_count_raw.dw0 as u16 + 1;
@@ -434,34 +486,6 @@ impl NvmeController {
         })
     }
 
-    fn identify_read<T: Copy>(&mut self, cns: u32, cmd: impl FnOnce(&mut SQEntry)) -> T {
-        self.identify(cns, cmd);
-        let identify = unsafe { *(self.adm_buf.as_ptr::<T>()) };
-        identify
-    }
-
-    fn identify(&mut self, cns: u32, cmd: impl FnOnce(&mut SQEntry)) -> CQEntry {
-        let mut identify = SQEntry::default();
-        identify.cdw0 = spec::op::IDENTIFY | (1 << 16);
-        identify.prp1 = self.adm_buf.phys().as_u64();
-        identify.cdw10 = cns;
-
-        cmd(&mut identify);
-
-        self.submit_admin_command(identify)
-    }
-
-    fn set_features(&mut self, fid: u32, cmd: impl FnOnce(&mut SQEntry)) -> CQEntry {
-        let mut features = SQEntry::default();
-        features.cdw0 = spec::op::SET_FEATURES | (1 << 16);
-        features.prp1 = self.adm_buf.phys().as_u64();
-        features.cdw10 = fid;
-
-        cmd(&mut features);
-
-        self.submit_admin_command(features)
-    }
-
     pub unsafe fn write_reg(&self, offset: u32, val: u32) {
         let binding = self.device.lock();
         let Some(bar) = binding.get_bar(0) else {
@@ -513,7 +537,7 @@ impl NvmeController {
             bar.write64(spec::ACQ, acq.phys().unwrap());
         }
 
-        QueuePair::<Admin>::new(controller, asq, acq)
+        QueuePair::<Admin>::new_admin(controller, asq, acq, alloc_dma_region(PAGE_SIZE))
     }
 }
 

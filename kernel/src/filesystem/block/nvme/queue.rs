@@ -7,7 +7,10 @@ use core::{
 use alloc::sync::Weak;
 use spin::Mutex;
 
-use crate::{allocator::mmio::MappedRegion, filesystem::block::nvme::NvmeController};
+use crate::{
+    allocator::mmio::MappedRegion,
+    filesystem::block::nvme::{NvmeController, commands::NvmeCommand},
+};
 
 pub trait QueueKind {
     fn doorbell(queue_id: u16, dstrd: u8) -> u32;
@@ -64,7 +67,9 @@ pub trait QueuePairKind {
         Self: Sized;
 }
 
-pub struct Admin;
+pub struct Admin {
+    pub buf: MappedRegion,
+}
 
 impl Admin {
     pub fn submit_cmd(pair: &mut QueuePair<Self>, command: SQEntry) {
@@ -127,6 +132,7 @@ impl QueuePairKind for Admin {
         core::future::ready(cq)
     }
 }
+
 impl QueuePairKind for Io {
     fn submit_async(pair: &mut QueuePair<Self>, command: SQEntry) -> impl Future<Output = CQEntry>
     where
@@ -136,21 +142,8 @@ impl QueuePairKind for Io {
     }
 }
 
-impl QueuePair<Admin> {
-    pub fn submit_sync(&mut self, command: SQEntry) -> CQEntry {
-        Admin::submit_polled(self, command)
-    }
-}
-
-pub struct QueuePair<K: QueuePairKind> {
-    pub controller: Weak<Mutex<NvmeController>>,
-    pub subm: Queue<Submission>,
-    pub comp: Queue<Completion>,
-    _phantom: PhantomData<K>,
-}
-
-impl<K: QueuePairKind> QueuePair<K> {
-    pub const fn new(
+impl QueuePair<Io> {
+    pub fn new_io(
         controller: Weak<Mutex<NvmeController>>,
         subm: Queue<Submission>,
         comp: Queue<Completion>,
@@ -159,12 +152,56 @@ impl<K: QueuePairKind> QueuePair<K> {
             controller,
             subm,
             comp,
-            _phantom: PhantomData,
+            kind: Io,
+        }
+    }
+}
+
+impl QueuePair<Admin> {
+    pub fn new_admin(
+        controller: Weak<Mutex<NvmeController>>,
+        subm: Queue<Submission>,
+        comp: Queue<Completion>,
+        buffer: MappedRegion,
+    ) -> Self {
+        QueuePair {
+            controller,
+            subm,
+            comp,
+            kind: Admin { buf: buffer },
         }
     }
 
-    pub fn submit(&mut self, command: SQEntry) -> impl Future<Output = CQEntry> {
-        K::submit_async(self, command)
+    pub fn submit_sync<C: NvmeCommand>(&mut self, command: C) -> CQEntry {
+        Admin::submit_polled(self, Self::build_entry(command))
+    }
+
+    pub unsafe fn read<T: Copy>(&self) -> T {
+        unsafe { *(self.kind.buf.as_ptr::<T>()) }
+    }
+
+    pub fn buffer(&self) -> &MappedRegion {
+        &self.kind.buf
+    }
+}
+
+pub struct QueuePair<K: QueuePairKind> {
+    pub controller: Weak<Mutex<NvmeController>>,
+    pub subm: Queue<Submission>,
+    pub comp: Queue<Completion>,
+    pub kind: K,
+}
+
+impl<K: QueuePairKind> QueuePair<K> {
+    fn build_entry<C: NvmeCommand>(command: C) -> SQEntry {
+        let mut entry = SQEntry::default();
+        entry.cdw0 = C::OPCODE | (1 << 16);
+        command.configure(&mut entry);
+        entry
+    }
+
+    pub fn submit<C: NvmeCommand>(&mut self, command: C) -> impl Future<Output = CQEntry> {
+        K::submit_async(self, Self::build_entry(command))
     }
 
     unsafe fn write_reg(&mut self, offset: u32, val: u32) {
@@ -208,8 +245,6 @@ impl<K: QueueKind> Queue<K> {
         self.region.as_ref().map(|r| r.virt().as_u64())
     }
 }
-
-impl Queue<Submission> {}
 
 #[derive(Default)]
 #[repr(C)]
