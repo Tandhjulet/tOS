@@ -13,7 +13,10 @@ use crate::{
                 IdentifyNamespaceIndependent, IdentifyNamespaceList, IdentifyNamespaceNvm,
                 IdentifyNamespaceSpecificNvm, NvmNamespaceData, NvmeCommandSet, NvmeNamespace,
             },
-            queue::{CQEntry, Completion, Queue, QueuePair, RingQueueState, SQEntry, Submission},
+            queue::{
+                Admin, CQEntry, Completion, Io, Queue, QueuePair, RingQueueState, SQEntry,
+                Submission,
+            },
         },
     },
     io::pci::{PciDevice, bar::Bar},
@@ -35,10 +38,10 @@ pub struct NvmeController {
 
     identify_ctlr: Option<IdentifyController>,
 
-    adm_queue: Option<QueuePair>,
+    adm_queue: Option<QueuePair<Admin>>,
     adm_buf: MappedRegion,
 
-    pub queues: Vec<Arc<Mutex<QueuePair>>>,
+    pub queues: Vec<Arc<Mutex<QueuePair<Io>>>>,
 }
 
 impl NvmeController {
@@ -184,7 +187,7 @@ impl NvmeController {
         &mut self,
         nsid: u32,
         csi: u8,
-        queue: Arc<Mutex<QueuePair>>,
+        queue: Arc<Mutex<QueuePair<Io>>>,
     ) -> NvmeNamespace {
         let command_set = match csi {
             spec::csi::NVM => {
@@ -346,7 +349,7 @@ impl NvmeController {
         self.adm_queue
             .as_mut()
             .expect("Admin queues should be initialized")
-            .submit_polled(command)
+            .submit_sync(command)
     }
 
     pub fn create_queue_pair(
@@ -354,15 +357,11 @@ impl NvmeController {
         entry_count: usize,
         id: u16,
         controller: Weak<Mutex<NvmeController>>,
-    ) -> Arc<Mutex<QueuePair>> {
+    ) -> Arc<Mutex<QueuePair<Io>>> {
         let comp = self.create_io_comp_queue(entry_count, id, id as u32);
         let subm = self.create_io_subm_queue(entry_count, id, id);
 
-        Arc::new(Mutex::new(QueuePair {
-            controller,
-            subm,
-            comp,
-        }))
+        Arc::new(Mutex::new(QueuePair::<Io>::new(controller, subm, comp)))
     }
 
     fn init_queue_cnt(&mut self) -> u16 {
@@ -483,7 +482,7 @@ impl NvmeController {
         unsafe { bar.read32(offset) }
     }
 
-    fn create_admin_queues(&self, controller: Weak<Mutex<NvmeController>>) -> QueuePair {
+    fn create_admin_queues(&self, controller: Weak<Mutex<NvmeController>>) -> QueuePair<Admin> {
         let binding = self.device.lock();
         let Some(bar) = PciDevice::get_bar(&binding, 0) else {
             panic!("Could not find BAR0 for NVMe!");
@@ -514,11 +513,7 @@ impl NvmeController {
             bar.write64(spec::ACQ, acq.phys().unwrap());
         }
 
-        QueuePair {
-            controller,
-            subm: asq,
-            comp: acq,
-        }
+        QueuePair::<Admin>::new(controller, asq, acq)
     }
 }
 

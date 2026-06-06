@@ -58,35 +58,30 @@ impl Default for RingQueueState {
     }
 }
 
-pub struct QueuePair {
-    pub controller: Weak<Mutex<NvmeController>>,
-    pub subm: Queue<Submission>,
-    pub comp: Queue<Completion>,
+pub trait QueuePairKind {
+    fn submit_async(pair: &mut QueuePair<Self>, command: SQEntry) -> impl Future<Output = CQEntry>
+    where
+        Self: Sized;
 }
 
-impl QueuePair {
-    pub fn submit_polled(&mut self, command: SQEntry) -> CQEntry {
-        self.submit_cmd(command);
-        self.next_completion()
-    }
+pub struct Admin;
 
-    pub fn submit_cmd(&mut self, command: SQEntry) {
+impl Admin {
+    pub fn submit_cmd(pair: &mut QueuePair<Self>, command: SQEntry) {
         let slot =
-            self.subm.virt().unwrap() + (self.subm.state.tail as u64 * size_of::<SQEntry>() as u64);
-        unsafe {
-            write_volatile(slot as *mut SQEntry, command);
-        };
+            pair.subm.virt().unwrap() + (pair.subm.state.tail as u64 * size_of::<SQEntry>() as u64);
+        unsafe { write_volatile(slot as *mut SQEntry, command) }
 
-        self.subm.state.tail = (self.subm.state.tail + 1) % self.subm.state.size as u16;
-        let tail = self.subm.state.tail;
+        pair.subm.state.tail = (pair.subm.state.tail + 1) % pair.subm.state.size as u16;
+        let tail = pair.subm.state.tail;
 
-        let doorbell = self.subm.doorbell;
-        unsafe { self.write_reg(doorbell, tail as u32) }
+        let doorbell = pair.subm.doorbell;
+        unsafe { pair.write_reg(doorbell, tail as u32) }
     }
 
-    pub fn next_completion(&mut self) -> CQEntry {
+    pub fn next_completion(pair: &mut QueuePair<Self>) -> CQEntry {
         let (slot, phase) = {
-            let cq = &self.comp;
+            let cq = &pair.comp;
             let slot = cq.virt().unwrap() + (cq.state.head as u64 * size_of::<CQEntry>() as u64);
             (slot, cq.state.phase)
         };
@@ -99,7 +94,7 @@ impl QueuePair {
         };
 
         let new_head = {
-            let cq = &mut self.comp;
+            let cq = &mut pair.comp;
             cq.state.head += 1;
             if cq.state.head > cq.state.size as u16 {
                 cq.state.head = 0;
@@ -109,10 +104,67 @@ impl QueuePair {
             cq.state.head
         };
 
-        let doorbell = self.comp.doorbell;
-        unsafe { self.write_reg(doorbell, new_head as u32) }
+        let doorbell = pair.comp.doorbell;
+        unsafe { pair.write_reg(doorbell, new_head as u32) }
 
         entry
+    }
+
+    pub fn submit_polled(pair: &mut QueuePair<Self>, command: SQEntry) -> CQEntry {
+        Self::submit_cmd(pair, command);
+        Self::next_completion(pair)
+    }
+}
+
+pub struct Io;
+
+impl QueuePairKind for Admin {
+    fn submit_async(pair: &mut QueuePair<Self>, command: SQEntry) -> impl Future<Output = CQEntry>
+    where
+        Self: Sized,
+    {
+        let cq = Self::submit_polled(pair, command);
+        core::future::ready(cq)
+    }
+}
+impl QueuePairKind for Io {
+    fn submit_async(pair: &mut QueuePair<Self>, command: SQEntry) -> impl Future<Output = CQEntry>
+    where
+        Self: Sized,
+    {
+        todo!()
+    }
+}
+
+impl QueuePair<Admin> {
+    pub fn submit_sync(&mut self, command: SQEntry) -> CQEntry {
+        Admin::submit_polled(self, command)
+    }
+}
+
+pub struct QueuePair<K: QueuePairKind> {
+    pub controller: Weak<Mutex<NvmeController>>,
+    pub subm: Queue<Submission>,
+    pub comp: Queue<Completion>,
+    _phantom: PhantomData<K>,
+}
+
+impl<K: QueuePairKind> QueuePair<K> {
+    pub const fn new(
+        controller: Weak<Mutex<NvmeController>>,
+        subm: Queue<Submission>,
+        comp: Queue<Completion>,
+    ) -> Self {
+        QueuePair {
+            controller,
+            subm,
+            comp,
+            _phantom: PhantomData,
+        }
+    }
+
+    pub fn submit(&mut self, command: SQEntry) -> impl Future<Output = CQEntry> {
+        K::submit_async(self, command)
     }
 
     unsafe fn write_reg(&mut self, offset: u32, val: u32) {
