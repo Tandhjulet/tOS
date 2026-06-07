@@ -6,12 +6,12 @@
 #![reexport_test_harness_main = "test_main"]
 
 pub mod allocator;
+pub mod core;
 pub mod filesystem;
-pub mod helpers;
 pub mod io;
 pub mod sys;
 
-use core::panic::PanicInfo;
+use ::core::panic::PanicInfo;
 
 use bootloader_api::info::FrameBufferInfo;
 
@@ -37,7 +37,7 @@ where
     T: Fn(),
 {
     fn run(&self) {
-        serial_print!("{}...\t", core::any::type_name::<T>());
+        serial_print!("{}...\t", ::core::any::type_name::<T>());
         self();
         serial_println!("[ok]");
     }

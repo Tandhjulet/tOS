@@ -1,10 +1,10 @@
-use core::net::Ipv4Addr;
+use crate::io::net::Ipv4Addr;
 
 use alloc::borrow::ToOwned;
 use alloc::format;
 use alloc::string::String;
 
-use crate::helpers;
+use crate::core::checksum;
 use crate::io::net::protocols::dhcp::EnsureDHCPLease;
 use crate::io::net::protocols::ip::{IP, IPProtocol, IpHeader};
 use crate::io::net::protocols::socket::{RecvPacket, SOCKET_TABLE};
@@ -316,13 +316,13 @@ impl TcpPacket {
     }
 
     pub fn calculate_recv_checksum(&self) -> u16 {
-        helpers::fold_sum(helpers::sum_byte_arr(&self.raw()) + self.pseudo_header_sum())
+        checksum::fold_sum(checksum::sum_byte_arr(&self.raw()) + self.pseudo_header_sum())
     }
 
     pub fn calculate_send_checksum(&self) -> u16 {
-        let sum = helpers::fold_sum(
-            helpers::sum_byte_arr(&self.raw()[..16])
-                + helpers::sum_byte_arr(&self.raw()[18..])
+        let sum = checksum::fold_sum(
+            checksum::sum_byte_arr(&self.raw()[..16])
+                + checksum::sum_byte_arr(&self.raw()[18..])
                 + self.pseudo_header_sum(),
         );
         !sum

@@ -1,9 +1,9 @@
-use core::net::Ipv4Addr;
+use crate::core::checksum;
+use crate::io::net::Ipv4Addr;
 
 use alloc::{format, string::String};
 use num_enum::TryFromPrimitive;
 
-use crate::helpers;
 use crate::io::net::protocols::arp::Arp;
 use crate::io::net::protocols::dhcp::EnsureDHCPLease;
 use crate::io::net::protocols::ethernet::{EtherType, Ethernet, EthernetHeader};
@@ -222,14 +222,14 @@ impl<'a> IpHeader<'a> {
     }
 
     pub fn calculate_recv_checksum(&self) -> u16 {
-        helpers::fold_sum(
-            helpers::sum_byte_arr(&self.header()) + helpers::sum_byte_arr(&self.options()),
+        checksum::fold_sum(
+            checksum::sum_byte_arr(&self.header()) + checksum::sum_byte_arr(&self.options()),
         )
     }
 
     pub fn calculate_send_checksum(buf: &[u8]) -> u16 {
-        let sum = helpers::fold_sum(
-            helpers::sum_byte_arr(&buf[..10]) + helpers::sum_byte_arr(&buf[12..]),
+        let sum = checksum::fold_sum(
+            checksum::sum_byte_arr(&buf[..10]) + checksum::sum_byte_arr(&buf[12..]),
         );
         !sum
     }

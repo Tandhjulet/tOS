@@ -22,8 +22,6 @@ use crate::{
 
 #[allow(unused)]
 pub(super) mod cfg {
-    use crate::helpers;
-
     // Refer to Table 13-2 in https://www.intel.com/content/dam/doc/manual/pci-pci-x-family-gbe-controllers-software-dev-manual.pdf#page389
     // for documentation about these constants
     pub const CTRL: u16 = 0x0; // Device Control
@@ -127,7 +125,8 @@ pub(super) mod cfg {
 
     // MISC
     pub const MTA_LENGTH: usize = 128;
-    pub const REG_MTA: [u16; MTA_LENGTH] = helpers::build_range::<MTA_LENGTH>(0x5200, 4); // Multicast Table Array 
+    pub const REG_MTA: [u16; MTA_LENGTH] =
+        crate::core::consts::build_range::<MTA_LENGTH>(0x5200, 4); // Multicast Table Array 
 
     pub const RX_BUFFER_SIZE: usize = 8192;
 }

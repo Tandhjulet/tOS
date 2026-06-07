@@ -1,8 +1,8 @@
-use core::net::Ipv4Addr;
+use crate::core::checksum;
+use crate::io::net::Ipv4Addr;
 
 use alloc::{string::String, vec::Vec};
 
-use crate::helpers;
 use crate::io::net::PacketBuf;
 use crate::io::net::protocols::ip::{IP, IPProtocol, IpHeader};
 use crate::io::net::protocols::socket::{RecvPacket, SOCKET_TABLE};
@@ -143,13 +143,13 @@ impl UdpPacket {
     }
 
     pub fn calculate_recv_checksum(&self) -> u16 {
-        helpers::fold_sum(helpers::sum_byte_arr(&self.raw()) + self.pseudo_header_sum())
+        checksum::fold_sum(checksum::sum_byte_arr(&self.raw()) + self.pseudo_header_sum())
     }
 
     pub fn calculate_send_checksum(&self) -> u16 {
-        let sum = helpers::fold_sum(
-            000 + helpers::sum_byte_arr(&self.raw()[..6])
-                + helpers::sum_byte_arr(&self.raw()[8..])
+        let sum = checksum::fold_sum(
+            000 + checksum::sum_byte_arr(&self.raw()[..6])
+                + checksum::sum_byte_arr(&self.raw()[8..])
                 + self.pseudo_header_sum(),
         );
         !sum
