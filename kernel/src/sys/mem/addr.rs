@@ -1,5 +1,7 @@
 use core::ops::{Add, Sub};
 
+use crate::core::align::{align_down, align_up};
+
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct PhysAddr(u64);
 
@@ -17,13 +19,11 @@ impl PhysAddr {
     }
 
     pub fn align_down(&self, align: u64) -> Self {
-        assert!(align.is_power_of_two(), "`align` must be a power of two");
-        Self(self.0 & !(align - 1))
+        Self(align_down(self.0 as usize, align as usize) as u64)
     }
 
     pub fn align_up(&self, align: u64) -> Self {
-        assert!(align.is_power_of_two(), "`align` must be a power of two");
-        Self((self.0 + align - 1) & !(align - 1))
+        Self(align_up(self.0 as usize, align as usize) as u64)
     }
 }
 

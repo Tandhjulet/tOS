@@ -29,4 +29,13 @@ pub fn alloc_page() -> Option<PhysFrame<Size4KiB>> {
 pub unsafe trait FrameAllocator<S: PageSize> {
     fn alloc_frame(&mut self) -> Option<PhysFrame<S>>;
     fn dealloc_frame(&mut self, frame: PhysFrame<S>);
+
+    fn alloc_frames(&mut self, count: usize) -> Option<PhysFrame<S>> {
+        let start = self.alloc_frame()?;
+        for _ in 1..count {
+            self.alloc_frame()?;
+        }
+
+        Some(start)
+    }
 }

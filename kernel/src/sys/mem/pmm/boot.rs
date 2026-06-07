@@ -18,6 +18,14 @@ impl BootFrameAllocator {
             cursor: PhysAddr::zero(),
         }
     }
+
+    pub fn usable_frame_count(&self) -> usize {
+        self.memory_map
+            .iter()
+            .filter(|r| r.kind == MemoryRegionKind::Usable)
+            .map(|r| ((r.end - r.start) / FRAME_SIZE) as usize)
+            .sum()
+    }
 }
 
 unsafe impl FrameAllocator<Size4KiB> for BootFrameAllocator {

@@ -17,4 +17,8 @@ impl<S: PageSize> PhysFrame<S> {
             size: PhantomData,
         }
     }
+
+    pub fn addr(&self) -> PhysAddr {
+        self.start
+    }
 }
