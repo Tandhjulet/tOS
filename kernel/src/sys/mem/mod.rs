@@ -8,6 +8,5 @@ pub mod frame;
 pub mod heap;
 pub mod mmio;
 pub mod page;
-pub mod paging;
 pub mod pmm;
 pub mod vmm;

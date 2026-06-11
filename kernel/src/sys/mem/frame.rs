@@ -5,6 +5,7 @@ use crate::sys::mem::{
     page::{PageSize, Size4KiB},
 };
 
+#[derive(Debug)]
 pub struct PhysFrame<S: PageSize = Size4KiB> {
     start: PhysAddr,
     size: PhantomData<S>,

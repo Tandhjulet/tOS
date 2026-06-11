@@ -2,7 +2,7 @@ use core::ops::{Add, Sub};
 
 use crate::core::align::{align_down, align_up};
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub struct PhysAddr(u64);
 
 impl PhysAddr {
