@@ -17,7 +17,7 @@ impl PageTableFlags {
     pub const CACHE_DISABLED: Self = Self(1 << 4);
     pub const ACCESSED: Self = Self(1 << 5);
     pub const DIRTY: Self = Self(1 << 6);
-    pub const HUGE_TABLE: Self = Self(1 << 7);
+    pub const HUGE_PAGE: Self = Self(1 << 7);
     pub const GLOBAL: Self = Self(1 << 8);
     pub const NO_EXECUTE: Self = Self(1 << 63);
 
@@ -101,7 +101,7 @@ impl PageTableEntry {
 
     #[inline]
     pub fn is_huge(&self) -> bool {
-        self.flags().contains(PageTableFlags::HUGE_TABLE)
+        self.flags().contains(PageTableFlags::HUGE_PAGE)
     }
 
     #[inline]
@@ -142,8 +142,8 @@ impl PageTableEntry {
 
     #[inline]
     pub fn set_frame(&mut self, frame: PhysFrame, flags: PageTableFlags) {
-        assert!(!flags.contains(PageTableFlags::HUGE_TABLE));
-        self.set_addr_and_flags(frame.addr(), flags);
+        assert!(!flags.contains(PageTableFlags::HUGE_PAGE));
+        self.set_addr_and_flags(frame.start_addr(), flags);
     }
 }
 

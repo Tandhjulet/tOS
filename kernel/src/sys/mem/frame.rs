@@ -19,7 +19,7 @@ impl<S: PageSize> PhysFrame<S> {
         }
     }
 
-    pub fn addr(&self) -> PhysAddr {
+    pub fn start_addr(&self) -> PhysAddr {
         self.start
     }
 }

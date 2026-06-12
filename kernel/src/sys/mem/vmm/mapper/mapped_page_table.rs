@@ -1,7 +1,7 @@
 use crate::sys::mem::{
     addr::VirtAddr,
     frame::PhysFrame,
-    page::Size4KiB,
+    page::{PageSize, Size1GiB, Size2MiB, Size4KiB},
     pmm::FrameAllocator,
     vmm::{
         Page,
@@ -35,12 +35,12 @@ impl<'a> MappedPageTable<'a> {
         &self.page_table_walker.offset
     }
 
-    fn walk(
+    fn walk<S: PageSize>(
         &mut self,
         indices: &[PageTableIndex],
         parent_flags: PageTableFlags,
         frame_allocator: &mut impl FrameAllocator,
-    ) -> Result<&'a mut PageTable, MapError<Size4KiB>> {
+    ) -> Result<&'a mut PageTable, MapError<S>> {
         let mut current: *mut PageTable = self.level_4_table;
         for &idx in indices {
             current = self.page_table_walker.create_next_table(
@@ -83,13 +83,67 @@ impl Mapper<Size4KiB> for MappedPageTable<'_> {
     }
 }
 
+impl Mapper<Size2MiB> for MappedPageTable<'_> {
+    unsafe fn map_to_with_table_flags(
+        &mut self,
+        page: Page<Size2MiB>,
+        frame: PhysFrame<Size2MiB>,
+        flags: PageTableFlags,
+        parent_flags: PageTableFlags,
+        frame_allocator: &mut impl FrameAllocator<Size4KiB>,
+    ) -> Result<(), MapError<Size2MiB>> {
+        let p2 = self.walk(
+            &[page.p4_index(), page.p3_index()],
+            parent_flags,
+            frame_allocator,
+        )?;
+
+        let entry = &mut p2[page.p2_index()];
+        if !entry.is_unused() {
+            return Err(MapError::AlreadyMapped(frame));
+        }
+
+        entry.set_addr_and_flags(frame.start_addr(), flags | PageTableFlags::HUGE_PAGE);
+        Ok(())
+    }
+
+    fn unmap(&mut self, page: Page<Size2MiB>) -> Result<(), super::UnmapError> {
+        todo!()
+    }
+}
+
+impl Mapper<Size1GiB> for MappedPageTable<'_> {
+    unsafe fn map_to_with_table_flags(
+        &mut self,
+        page: Page<Size1GiB>,
+        frame: PhysFrame<Size1GiB>,
+        flags: PageTableFlags,
+        parent_flags: PageTableFlags,
+        frame_allocator: &mut impl FrameAllocator<Size4KiB>,
+    ) -> Result<(), MapError<Size1GiB>> {
+        let p3 = self.walk(&[page.p4_index()], parent_flags, frame_allocator)?;
+
+        let entry = &mut p3[page.p3_index()];
+        if !entry.is_unused() {
+            return Err(MapError::AlreadyMapped(frame));
+        }
+
+        entry.set_addr_and_flags(frame.start_addr(), flags | PageTableFlags::HUGE_PAGE);
+        Ok(())
+    }
+
+    fn unmap(&mut self, page: Page<Size1GiB>) -> Result<(), super::UnmapError> {
+        todo!()
+    }
+}
+
 struct PageTableWalker {
     offset: VirtAddr,
 }
 
 impl PageTableWalker {
     fn next_table_ptr(&self, frame: PhysFrame) -> *mut PageTable {
-        let raw_table_ptr = self.offset + frame.addr().as_u64();
+        let raw_table_ptr = self.offset + frame.start_addr().as_u64();
         raw_table_ptr.as_mut_ptr::<PageTable>()
     }
 
@@ -115,7 +169,7 @@ impl PageTableWalker {
         entry: &'b mut PageTableEntry,
         insert_flags: PageTableFlags,
         frame_allocator: &mut impl FrameAllocator<Size4KiB>,
-    ) -> Result<&'b mut PageTable, MapError<Size4KiB>> {
+    ) -> Result<&'b mut PageTable, MapError<_>> {
         let created: bool;
 
         if entry.is_unused() {

@@ -47,7 +47,7 @@ impl BuddyFrameAllocator {
         let bitmap_region_start = boot
             .alloc_frames(bitmap_frame_count)
             .expect("should be able to initialize buddy allocator")
-            .addr();
+            .start_addr();
     }
 }
 
