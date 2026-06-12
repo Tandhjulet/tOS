@@ -1,6 +1,9 @@
 use core::ops::{Add, Sub};
 
-use crate::core::align::{align_down, align_up};
+use crate::{
+    core::align::{align_down, align_up},
+    sys::mem::vmm::paging::PageTableIndex,
+};
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub struct PhysAddr(u64);
@@ -43,7 +46,7 @@ impl Sub<u64> for PhysAddr {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct VirtAddr(u64);
 
 impl VirtAddr {
@@ -55,8 +58,32 @@ impl VirtAddr {
         Self(addr)
     }
 
-    pub fn as_u64(self) -> u64 {
+    pub const fn as_u64(self) -> u64 {
         self.0
+    }
+
+    pub const fn as_ptr<T>(self) -> *const T {
+        self.as_u64() as *const T
+    }
+
+    pub const fn as_mut_ptr<T>(self) -> *mut T {
+        self.as_ptr::<T>() as *mut T
+    }
+
+    pub(super) const fn pml4(self) -> PageTableIndex {
+        PageTableIndex::new_truncated((self.0 >> 12 >> 9 >> 9 >> 9) as u16)
+    }
+
+    pub(super) const fn pdpt(self) -> PageTableIndex {
+        PageTableIndex::new_truncated((self.0 >> 12 >> 9 >> 9) as u16)
+    }
+
+    pub(super) const fn pd(self) -> PageTableIndex {
+        PageTableIndex::new_truncated((self.0 >> 12 >> 9) as u16)
+    }
+
+    pub(super) const fn pt(self) -> PageTableIndex {
+        PageTableIndex::new_truncated((self.0 >> 12) as u16)
     }
 }
 

@@ -6,16 +6,20 @@ use crate::sys::mem::{
     vmm::{Page, paging::PageTableFlags},
 };
 
+pub mod mapped_page_table;
+
 pub trait Mapper<S: PageSize> {
     unsafe fn map_to(
         &mut self,
         page: Page<S>,
         frame: PhysFrame<S>,
         flags: PageTableFlags,
-        frame_allocator: impl FrameAllocator<Size4KiB>,
+        frame_allocator: &mut impl FrameAllocator<Size4KiB>,
     ) {
         unimplemented!()
     }
+
+    fn translate_page(&self, page: Page<S>) -> Result<PhysFrame<S>, TranslateError> {}
 
     unsafe fn map_to_with_table_flags(
         &mut self,
@@ -23,7 +27,7 @@ pub trait Mapper<S: PageSize> {
         frame: PhysFrame<S>,
         flags: PageTableFlags,
         parent_flags: PageTableFlags,
-        frame_allocator: impl FrameAllocator<Size4KiB>,
+        frame_allocator: &mut impl FrameAllocator<Size4KiB>,
     ) -> Result<(), MapError<S>>;
 
     fn unmap(&mut self, page: Page<S>) -> Result<(), UnmapError>;
@@ -32,7 +36,7 @@ pub trait Mapper<S: PageSize> {
         &mut self,
         frame: PhysFrame<S>,
         flags: PageTableFlags,
-        frame_allocator: impl FrameAllocator<Size4KiB>,
+        frame_allocator: &mut impl FrameAllocator<Size4KiB>,
     ) -> Result<(), MapError<S>> {
         unimplemented!()
     }
@@ -45,8 +49,12 @@ pub enum MapError<S: PageSize> {
     AlreadyMapped(PhysFrame<S>),
 }
 
+#[derive(Debug)]
 pub enum UnmapError {
     ParentHugePage,
     PageNotMapped,
     InvalidFrameAddr(PhysAddr),
 }
+
+#[derive(Debug)]
+pub enum TranslateError {}

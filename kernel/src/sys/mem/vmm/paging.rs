@@ -1,4 +1,4 @@
-use core::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Deref, DerefMut};
+use core::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Deref, DerefMut, Index, IndexMut};
 
 use crate::sys::mem::{addr::PhysAddr, frame::PhysFrame};
 
@@ -24,6 +24,10 @@ impl PageTableFlags {
     #[inline]
     pub const fn bits(self) -> u64 {
         self.0
+    }
+
+    pub const fn empty(self) -> bool {
+        self.0 == 0
     }
 
     pub const fn contains(self, other: Self) -> bool {
@@ -120,6 +124,27 @@ impl PageTableEntry {
             Ok(PhysFrame::containing_address(self.addr()))
         }
     }
+
+    #[inline]
+    pub fn set_addr(&mut self, addr: PhysAddr) {
+        self.0 = (self.0 & !PHYS_MASK) | (addr.as_u64() & PHYS_MASK);
+    }
+
+    #[inline]
+    pub fn set_flags(&mut self, flags: PageTableFlags) {
+        self.0 = self.addr().as_u64() | flags.bits();
+    }
+
+    #[inline]
+    pub fn set_addr_and_flags(&mut self, addr: PhysAddr, flags: PageTableFlags) {
+        self.0 = (addr.as_u64() & PHYS_MASK) | flags.bits();
+    }
+
+    #[inline]
+    pub fn set_frame(&mut self, frame: PhysFrame, flags: PageTableFlags) {
+        assert!(!flags.contains(PageTableFlags::HUGE_TABLE));
+        self.set_addr_and_flags(frame.addr(), flags);
+    }
 }
 
 pub const TABLE_ENTRY_COUNT: usize = 512;
@@ -167,4 +192,39 @@ impl DerefMut for PageTable {
 pub enum FrameError {
     FrameNotPresent,
     HugeFrame,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PageTableIndex(u16);
+
+impl PageTableIndex {
+    pub const fn new(value: u16) -> Self {
+        assert!((value as usize) < TABLE_ENTRY_COUNT);
+        Self(value)
+    }
+
+    pub const fn new_truncated(value: u16) -> Self {
+        Self(value & 0x1ff)
+    }
+}
+
+impl Index<PageTableIndex> for PageTable {
+    type Output = PageTableEntry;
+
+    fn index(&self, index: PageTableIndex) -> &Self::Output {
+        &self.entries[usize::from(index)]
+    }
+}
+
+impl IndexMut<PageTableIndex> for PageTable {
+    fn index_mut(&mut self, index: PageTableIndex) -> &mut Self::Output {
+        &mut self.entries[usize::from(index)]
+    }
+}
+
+impl From<PageTableIndex> for usize {
+    #[inline]
+    fn from(index: PageTableIndex) -> Self {
+        usize::from(index.0)
+    }
 }

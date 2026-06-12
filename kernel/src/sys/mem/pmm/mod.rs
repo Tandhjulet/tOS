@@ -26,7 +26,7 @@ pub fn alloc_page() -> Option<PhysFrame<Size4KiB>> {
     None
 }
 
-pub unsafe trait FrameAllocator<S: PageSize> {
+pub unsafe trait FrameAllocator<S: PageSize = Size4KiB> {
     fn alloc_frame(&mut self) -> Option<PhysFrame<S>>;
     fn dealloc_frame(&mut self, frame: PhysFrame<S>);
 
