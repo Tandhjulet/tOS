@@ -19,7 +19,7 @@ pub trait Mapper<S: PageSize> {
         unimplemented!()
     }
 
-    fn translate_page(&self, page: Page<S>) -> Result<PhysFrame<S>, TranslateError> {}
+    fn translate_page(&self, page: Page<S>) -> Result<PhysFrame<S>, TranslateError>;
 
     unsafe fn map_to_with_table_flags(
         &mut self,
@@ -57,4 +57,6 @@ pub enum UnmapError {
 }
 
 #[derive(Debug)]
-pub enum TranslateError {}
+pub enum TranslateError {
+    PageNotMapped,
+}

@@ -5,7 +5,7 @@ use crate::sys::mem::{
     pmm::FrameAllocator,
     vmm::{
         Page,
-        mapper::{MapError, Mapper},
+        mapper::{MapError, Mapper, TranslateError, UnmapError},
         paging::{FrameError, PageTable, PageTableEntry, PageTableFlags, PageTableIndex},
     },
 };
@@ -79,6 +79,43 @@ impl Mapper<Size4KiB> for MappedPageTable<'_> {
     }
 
     fn unmap(&mut self, page: Page<Size4KiB>) -> Result<(), super::UnmapError> {
+        let p4 = &mut self.level_4_table;
+        let p3 = self
+            .page_table_walker
+            .next_mut_table(&mut p4[page.p4_index()])?;
+        let p2 = self
+            .page_table_walker
+            .next_mut_table(&mut p3[page.p3_index()])?;
+        let p1 = self
+            .page_table_walker
+            .next_mut_table(&mut p2[page.p2_index()])?;
+
+        let entry = &mut p1[page.p1_index()];
+
+        let frame = entry.frame().map_err(|err| match err {
+            FrameError::FrameNotPresent => UnmapError::PageNotMapped,
+            FrameError::HugeFrame => UnmapError::ParentHugePage,
+        })?;
+
+        entry.clear();
+        Ok(())
+    }
+
+    fn translate_page(
+        &self,
+        page: Page<Size4KiB>,
+    ) -> Result<PhysFrame<Size4KiB>, super::TranslateError> {
+        let p4 = &self.level_4_table;
+        let p3 = self.page_table_walker.next_table(&p4[page.p4_index()])?;
+        let p2 = self.page_table_walker.next_table(&p3[page.p3_index()])?;
+        let p1 = self.page_table_walker.next_table(&p2[page.p2_index()])?;
+
+        let entry = &p1[page.p1_index()];
+        if entry.is_unused() {
+            return Err(TranslateError::PageNotMapped);
+        }
+
+        // TODO: get phys frame
         todo!()
     }
 }
@@ -110,6 +147,13 @@ impl Mapper<Size2MiB> for MappedPageTable<'_> {
     fn unmap(&mut self, page: Page<Size2MiB>) -> Result<(), super::UnmapError> {
         todo!()
     }
+
+    fn translate_page(
+        &self,
+        page: Page<Size2MiB>,
+    ) -> Result<PhysFrame<Size2MiB>, super::TranslateError> {
+        todo!()
+    }
 }
 
 impl Mapper<Size1GiB> for MappedPageTable<'_> {
@@ -135,6 +179,13 @@ impl Mapper<Size1GiB> for MappedPageTable<'_> {
     fn unmap(&mut self, page: Page<Size1GiB>) -> Result<(), super::UnmapError> {
         todo!()
     }
+
+    fn translate_page(
+        &self,
+        page: Page<Size1GiB>,
+    ) -> Result<PhysFrame<Size1GiB>, super::TranslateError> {
+        todo!()
+    }
 }
 
 struct PageTableWalker {
@@ -147,7 +198,7 @@ impl PageTableWalker {
         raw_table_ptr.as_mut_ptr::<PageTable>()
     }
 
-    fn next_table<'b>(&self, entry: PageTableEntry) -> Result<&'b PageTable, FrameError> {
+    fn next_table<'b>(&self, entry: &'b PageTableEntry) -> Result<&'b PageTable, FrameError> {
         let table_ptr = self.next_table_ptr(entry.frame()?);
         let page_table = unsafe { &*table_ptr };
 
