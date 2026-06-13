@@ -59,4 +59,5 @@ pub enum UnmapError {
 #[derive(Debug)]
 pub enum TranslateError {
     PageNotMapped,
+    ParentHugePage,
 }

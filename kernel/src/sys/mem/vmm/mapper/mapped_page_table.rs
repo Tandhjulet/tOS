@@ -34,24 +34,6 @@ impl<'a> MappedPageTable<'a> {
     pub const fn offset(&self) -> &VirtAddr {
         &self.page_table_walker.offset
     }
-
-    fn walk<S: PageSize>(
-        &mut self,
-        indices: &[PageTableIndex],
-        parent_flags: PageTableFlags,
-        frame_allocator: &mut impl FrameAllocator,
-    ) -> Result<&'a mut PageTable, MapError<S>> {
-        let mut current: *mut PageTable = self.level_4_table;
-        for &idx in indices {
-            current = self.page_table_walker.create_next_table(
-                unsafe { &mut (*current)[idx] },
-                parent_flags,
-                frame_allocator,
-            )? as *mut PageTable;
-        }
-
-        Ok(unsafe { &mut *current })
-    }
 }
 
 impl Mapper<Size4KiB> for MappedPageTable<'_> {
@@ -63,8 +45,18 @@ impl Mapper<Size4KiB> for MappedPageTable<'_> {
         parent_flags: PageTableFlags,
         frame_allocator: &mut impl FrameAllocator<Size4KiB>,
     ) -> Result<(), super::MapError<Size4KiB>> {
-        let p1 = self.walk(
-            &[page.p4_index(), page.p3_index(), page.p2_index()],
+        let p3 = self.page_table_walker.create_next_table(
+            &mut self.level_4_table[page.p4_index()],
+            parent_flags,
+            frame_allocator,
+        )?;
+        let p2 = self.page_table_walker.create_next_table(
+            &mut p3[page.p3_index()],
+            parent_flags,
+            frame_allocator,
+        )?;
+        let p1 = self.page_table_walker.create_next_table(
+            &mut p2[page.p2_index()],
             parent_flags,
             frame_allocator,
         )?;
@@ -129,8 +121,13 @@ impl Mapper<Size2MiB> for MappedPageTable<'_> {
         parent_flags: PageTableFlags,
         frame_allocator: &mut impl FrameAllocator<Size4KiB>,
     ) -> Result<(), MapError<Size2MiB>> {
-        let p2 = self.walk(
-            &[page.p4_index(), page.p3_index()],
+        let p3 = self.page_table_walker.create_next_table(
+            &mut self.level_4_table[page.p4_index()],
+            parent_flags,
+            frame_allocator,
+        )?;
+        let p2 = self.page_table_walker.create_next_table(
+            &mut p3[page.p3_index()],
             parent_flags,
             frame_allocator,
         )?;
@@ -165,7 +162,11 @@ impl Mapper<Size1GiB> for MappedPageTable<'_> {
         parent_flags: PageTableFlags,
         frame_allocator: &mut impl FrameAllocator<Size4KiB>,
     ) -> Result<(), MapError<Size1GiB>> {
-        let p3 = self.walk(&[page.p4_index()], parent_flags, frame_allocator)?;
+        let p3 = self.page_table_walker.create_next_table(
+            &mut self.level_4_table[page.p4_index()],
+            parent_flags,
+            frame_allocator,
+        )?;
 
         let entry = &mut p3[page.p3_index()];
         if !entry.is_unused() {
@@ -198,7 +199,10 @@ impl PageTableWalker {
         raw_table_ptr.as_mut_ptr::<PageTable>()
     }
 
-    fn next_table<'b>(&self, entry: &'b PageTableEntry) -> Result<&'b PageTable, FrameError> {
+    fn next_table<'b>(
+        &self,
+        entry: &'b PageTableEntry,
+    ) -> Result<&'b PageTable, PageTableWalkError> {
         let table_ptr = self.next_table_ptr(entry.frame()?);
         let page_table = unsafe { &*table_ptr };
 
@@ -208,7 +212,7 @@ impl PageTableWalker {
     fn next_mut_table<'b>(
         &self,
         entry: &'b mut PageTableEntry,
-    ) -> Result<&'b mut PageTable, FrameError> {
+    ) -> Result<&'b mut PageTable, PageTableWalkError> {
         let table_ptr = self.next_table_ptr(entry.frame()?);
         let page_table = unsafe { &mut *table_ptr };
 
@@ -220,13 +224,13 @@ impl PageTableWalker {
         entry: &'b mut PageTableEntry,
         insert_flags: PageTableFlags,
         frame_allocator: &mut impl FrameAllocator<Size4KiB>,
-    ) -> Result<&'b mut PageTable, MapError<_>> {
+    ) -> Result<&'b mut PageTable, PageTableCreateError> {
         let created: bool;
 
         if entry.is_unused() {
             let frame = frame_allocator
                 .alloc_frame()
-                .ok_or(MapError::FrameAllocationFailed)?;
+                .ok_or(PageTableCreateError::FrameAllocationFailed)?;
 
             entry.set_frame(frame, insert_flags);
             created = true;
@@ -240,10 +244,10 @@ impl PageTableWalker {
 
         let page_table = match self.next_mut_table(entry) {
             Ok(table) => table,
-            Err(FrameError::HugeFrame) => {
-                return Err(MapError::ParentHugePage);
+            Err(PageTableWalkError::MappedToHugePage) => {
+                return Err(PageTableCreateError::MappedToHugePage);
             }
-            Err(FrameError::FrameNotPresent) => panic!("entry should be mapped at this point"),
+            Err(PageTableWalkError::NotMapped) => panic!("entry should be mapped at this point"),
         };
 
         if created {
@@ -254,7 +258,52 @@ impl PageTableWalker {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PageTableCreateError {
     FrameAllocationFailed,
     MappedToHugePage,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PageTableWalkError {
+    MappedToHugePage,
+    NotMapped,
+}
+
+impl From<PageTableWalkError> for TranslateError {
+    #[inline]
+    fn from(err: PageTableWalkError) -> Self {
+        match err {
+            PageTableWalkError::MappedToHugePage => TranslateError::ParentHugePage,
+            PageTableWalkError::NotMapped => TranslateError::PageNotMapped,
+        }
+    }
+}
+
+impl From<FrameError> for PageTableWalkError {
+    #[inline]
+    fn from(err: FrameError) -> Self {
+        match err {
+            FrameError::HugeFrame => PageTableWalkError::MappedToHugePage,
+            FrameError::FrameNotPresent => PageTableWalkError::NotMapped,
+        }
+    }
+}
+
+impl From<PageTableWalkError> for UnmapError {
+    fn from(err: PageTableWalkError) -> Self {
+        match err {
+            PageTableWalkError::MappedToHugePage => UnmapError::ParentHugePage,
+            PageTableWalkError::NotMapped => UnmapError::PageNotMapped,
+        }
+    }
+}
+
+impl<S: PageSize> From<PageTableCreateError> for MapError<S> {
+    fn from(err: PageTableCreateError) -> Self {
+        match err {
+            PageTableCreateError::FrameAllocationFailed => MapError::FrameAllocationFailed,
+            PageTableCreateError::MappedToHugePage => MapError::ParentHugePage,
+        }
+    }
 }
