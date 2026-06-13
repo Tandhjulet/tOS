@@ -2,7 +2,7 @@ use spin::{Mutex, Once};
 
 use crate::sys::mem::{
     frame::PhysFrame,
-    page::{PageSize, Size4KiB},
+    page_size::{PageSize, Size4KiB},
     pmm::buddy::BuddyFrameAllocator,
 };
 

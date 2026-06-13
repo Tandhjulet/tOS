@@ -2,7 +2,7 @@ use core::marker::PhantomData;
 
 use crate::sys::mem::{
     addr::VirtAddr,
-    page::{PageSize, Size4KiB},
+    page_size::{PageSize, Size4KiB},
     vmm::paging::PageTableIndex,
 };
 

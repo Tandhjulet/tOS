@@ -2,7 +2,7 @@ use core::marker::PhantomData;
 
 use crate::sys::mem::{
     addr::PhysAddr,
-    page::{PageSize, Size4KiB},
+    page_size::{PageSize, Size4KiB},
 };
 
 #[derive(Debug)]

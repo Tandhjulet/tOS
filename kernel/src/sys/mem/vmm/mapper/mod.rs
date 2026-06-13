@@ -1,7 +1,7 @@
 use crate::sys::mem::{
     addr::PhysAddr,
     frame::PhysFrame,
-    page::{PageSize, Size4KiB},
+    page_size::{PageSize, Size4KiB},
     pmm::FrameAllocator,
     vmm::{Page, paging::PageTableFlags},
 };

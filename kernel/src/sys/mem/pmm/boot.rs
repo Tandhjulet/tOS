@@ -1,7 +1,7 @@
 use bootloader_api::info::{MemoryRegion, MemoryRegionKind, MemoryRegions};
 
 use crate::sys::mem::{
-    FRAME_SIZE, addr::PhysAddr, frame::PhysFrame, page::Size4KiB, pmm::FrameAllocator,
+    FRAME_SIZE, addr::PhysAddr, frame::PhysFrame, page_size::Size4KiB, pmm::FrameAllocator,
 };
 
 pub struct BootFrameAllocator {
