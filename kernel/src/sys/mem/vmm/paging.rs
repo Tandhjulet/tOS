@@ -1,6 +1,6 @@
 use core::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Deref, DerefMut, Index, IndexMut};
 
-use crate::sys::mem::{addr::PhysAddr, frame::PhysFrame, vmm::mapper::TranslateError};
+use crate::sys::mem::{addr::PhysAddr, frame::PhysFrame};
 
 #[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
 #[repr(transparent)]

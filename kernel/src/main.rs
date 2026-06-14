@@ -11,15 +11,15 @@ use kernel::{
         net::{network_rx_task, network_tx_task},
         pci,
     },
-    println, serial_println,
+    serial_println,
     sys::{
         self,
         acpi::Acpi,
-        interrupts::{self, INTERRUPT_CONTROLLER},
+        interrupts::{self},
         task::{Task, executor::Executor, keyboard},
     },
 };
-use log::{error, info};
+use log::error;
 
 extern crate alloc;
 
