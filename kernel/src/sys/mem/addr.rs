@@ -57,7 +57,7 @@ impl Sub<u64> for PhysAddr {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct VirtAddr(u64);
 
 impl VirtAddr {

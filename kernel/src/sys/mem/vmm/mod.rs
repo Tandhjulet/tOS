@@ -9,7 +9,7 @@ use crate::sys::mem::{
 pub mod mapper;
 pub(super) mod paging;
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 #[repr(C)]
 pub struct Page<S: PageSize = Size4KiB> {
     start_addr: VirtAddr,

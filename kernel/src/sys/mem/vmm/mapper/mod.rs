@@ -1,3 +1,7 @@
+use core::arch::asm;
+
+use x86_64::registers::control::Cr3;
+
 use crate::sys::mem::{
     addr::PhysAddr,
     frame::PhysFrame,
@@ -28,9 +32,9 @@ pub trait Mapper<S: PageSize> {
         flags: PageTableFlags,
         parent_flags: PageTableFlags,
         frame_allocator: &mut impl FrameAllocator<Size4KiB>,
-    ) -> Result<(), MapError<S>>;
+    ) -> Result<MapperFlush<S>, MapError<S>>;
 
-    fn unmap(&mut self, page: Page<S>) -> Result<PhysFrame<S>, UnmapError>;
+    fn unmap(&mut self, page: Page<S>) -> Result<(PhysFrame<S>, MapperFlush<S>), UnmapError>;
 
     unsafe fn identify_map(
         &mut self,
@@ -61,4 +65,44 @@ pub enum TranslateError {
     PageNotMapped,
     ParentHugePage,
     InvalidFrameAddress(PhysAddr),
+}
+
+#[derive(Debug)]
+#[must_use = "TLB should be flushed due to Page Table changes"]
+pub struct MapperFlush<S: PageSize>(Page<S>);
+
+impl<S: PageSize> MapperFlush<S> {
+    pub fn new(page: Page<S>) -> Self {
+        Self(page)
+    }
+
+    pub fn flush(self) {
+        let addr = self.0.start_address();
+        unsafe {
+            asm!("invlpg [{}]", in(reg) addr.as_u64(), options(nostack, preserves_flags));
+        }
+    }
+
+    pub fn ignore(self) {}
+
+    pub fn page(&self) -> &Page<S> {
+        &self.0
+    }
+}
+
+#[derive(Debug)]
+#[must_use = "TLB should be flushed due to Page Table changes"]
+pub struct MapperFlushAll();
+
+impl MapperFlushAll {
+    pub fn new() -> Self {
+        Self()
+    }
+
+    pub fn flush(self) {
+        let (frame, flags) = Cr3::read();
+        unsafe { Cr3::write(frame, flags) }
+    }
+
+    pub fn ignore(self) {}
 }

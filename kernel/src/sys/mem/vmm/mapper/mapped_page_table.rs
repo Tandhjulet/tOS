@@ -5,7 +5,7 @@ use crate::sys::mem::{
     pmm::FrameAllocator,
     vmm::{
         Page,
-        mapper::{MapError, Mapper, TranslateError, UnmapError},
+        mapper::{MapError, Mapper, MapperFlush, TranslateError, UnmapError},
         paging::{FrameError, PageTable, PageTableEntry, PageTableFlags, PageTableIndex},
     },
 };
@@ -44,7 +44,7 @@ impl Mapper<Size4KiB> for MappedPageTable<'_> {
         flags: PageTableFlags,
         parent_flags: PageTableFlags,
         frame_allocator: &mut impl FrameAllocator<Size4KiB>,
-    ) -> Result<(), super::MapError<Size4KiB>> {
+    ) -> Result<MapperFlush<Size4KiB>, super::MapError<Size4KiB>> {
         let p1 = self.page_table_walker.create_walk_to_mut(
             self.level_4_table,
             &[page.p4_index(), page.p3_index(), page.p2_index()],
@@ -58,10 +58,13 @@ impl Mapper<Size4KiB> for MappedPageTable<'_> {
         }
 
         entry.set_frame(frame, flags);
-        Ok(())
+        Ok(MapperFlush::new(page))
     }
 
-    fn unmap(&mut self, page: Page<Size4KiB>) -> Result<PhysFrame, super::UnmapError> {
+    fn unmap(
+        &mut self,
+        page: Page<Size4KiB>,
+    ) -> Result<(PhysFrame<Size4KiB>, MapperFlush<Size4KiB>), super::UnmapError> {
         let p1 = self.page_table_walker.walk_to_mut(
             self.level_4_table,
             &[page.p4_index(), page.p3_index(), page.p2_index()],
@@ -75,7 +78,7 @@ impl Mapper<Size4KiB> for MappedPageTable<'_> {
         })?;
 
         entry.clear();
-        Ok(frame)
+        Ok((frame, MapperFlush::new(page)))
     }
 
     fn translate_page(
@@ -105,7 +108,7 @@ impl Mapper<Size2MiB> for MappedPageTable<'_> {
         flags: PageTableFlags,
         parent_flags: PageTableFlags,
         frame_allocator: &mut impl FrameAllocator<Size4KiB>,
-    ) -> Result<(), MapError<Size2MiB>> {
+    ) -> Result<MapperFlush<Size2MiB>, MapError<Size2MiB>> {
         let p2 = self.page_table_walker.create_walk_to_mut(
             self.level_4_table,
             &[page.p4_index(), page.p3_index()],
@@ -119,10 +122,13 @@ impl Mapper<Size2MiB> for MappedPageTable<'_> {
         }
 
         entry.set_addr_and_flags(frame.start_addr(), flags | PageTableFlags::HUGE_PAGE);
-        Ok(())
+        Ok(MapperFlush::new(page))
     }
 
-    fn unmap(&mut self, page: Page<Size2MiB>) -> Result<PhysFrame<Size2MiB>, super::UnmapError> {
+    fn unmap(
+        &mut self,
+        page: Page<Size2MiB>,
+    ) -> Result<(PhysFrame<Size2MiB>, MapperFlush<Size2MiB>), super::UnmapError> {
         let p2 = self
             .page_table_walker
             .walk_to_mut(self.level_4_table, &[page.p4_index(), page.p3_index()])?;
@@ -139,7 +145,7 @@ impl Mapper<Size2MiB> for MappedPageTable<'_> {
             .map_err(|_| UnmapError::InvalidFrameAddress(entry.addr()))?;
 
         entry.clear();
-        Ok(frame)
+        Ok((frame, MapperFlush::new(page)))
     }
 
     fn translate_page(
@@ -168,7 +174,7 @@ impl Mapper<Size1GiB> for MappedPageTable<'_> {
         flags: PageTableFlags,
         parent_flags: PageTableFlags,
         frame_allocator: &mut impl FrameAllocator<Size4KiB>,
-    ) -> Result<(), MapError<Size1GiB>> {
+    ) -> Result<MapperFlush<Size1GiB>, MapError<Size1GiB>> {
         let p3 = self.page_table_walker.create_walk_to_mut(
             self.level_4_table,
             &[page.p4_index()],
@@ -182,10 +188,13 @@ impl Mapper<Size1GiB> for MappedPageTable<'_> {
         }
 
         entry.set_addr_and_flags(frame.start_addr(), flags | PageTableFlags::HUGE_PAGE);
-        Ok(())
+        Ok(MapperFlush::new(page))
     }
 
-    fn unmap(&mut self, page: Page<Size1GiB>) -> Result<PhysFrame<Size1GiB>, super::UnmapError> {
+    fn unmap(
+        &mut self,
+        page: Page<Size1GiB>,
+    ) -> Result<(PhysFrame<Size1GiB>, MapperFlush<Size1GiB>), super::UnmapError> {
         let p3 = self
             .page_table_walker
             .walk_to_mut(self.level_4_table, &[page.p4_index()])?;
@@ -202,7 +211,7 @@ impl Mapper<Size1GiB> for MappedPageTable<'_> {
             .map_err(|_| UnmapError::InvalidFrameAddress(entry.addr()))?;
 
         entry.clear();
-        Ok(frame)
+        Ok((frame, MapperFlush::new(page)))
     }
 
     fn translate_page(
@@ -231,16 +240,6 @@ impl PageTableWalker {
     fn next_table_ptr(&self, frame: PhysFrame) -> *mut PageTable {
         let raw_table_ptr = self.offset + frame.start_addr().as_u64();
         raw_table_ptr.as_mut_ptr::<PageTable>()
-    }
-
-    fn next_table<'b>(
-        &self,
-        entry: &'b PageTableEntry,
-    ) -> Result<&'b PageTable, PageTableWalkError> {
-        let table_ptr = self.next_table_ptr(entry.frame()?);
-        let page_table = unsafe { &*table_ptr };
-
-        Ok(page_table)
     }
 
     fn next_mut_table<'b>(
