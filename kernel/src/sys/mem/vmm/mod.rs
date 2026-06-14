@@ -19,6 +19,13 @@ pub struct Page<S: PageSize = Size4KiB> {
 impl<S: PageSize> Page<S> {
     pub const SIZE: u64 = S::SIZE;
 
+    pub fn containing_address(addr: VirtAddr) -> Self {
+        Self {
+            start_addr: addr.align_down(S::SIZE),
+            size: PhantomData,
+        }
+    }
+
     pub const fn start_address(&self) -> VirtAddr {
         self.start_addr
     }

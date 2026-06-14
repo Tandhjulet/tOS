@@ -3,7 +3,7 @@ use core::arch::asm;
 use x86_64::registers::control::Cr3;
 
 use crate::sys::mem::{
-    addr::PhysAddr,
+    addr::{PhysAddr, VirtAddr},
     frame::PhysFrame,
     page::{PageSize, Size4KiB},
     pmm::FrameAllocator,
@@ -19,8 +19,13 @@ pub trait Mapper<S: PageSize> {
         frame: PhysFrame<S>,
         flags: PageTableFlags,
         frame_allocator: &mut impl FrameAllocator<Size4KiB>,
-    ) {
-        unimplemented!()
+    ) -> Result<MapperFlush<S>, MapError<S>> {
+        let parent_table_flags =
+            flags & (PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER);
+
+        unsafe {
+            self.map_to_with_table_flags(page, frame, flags, parent_table_flags, frame_allocator)
+        }
     }
 
     fn translate_page(&self, page: Page<S>) -> Result<PhysFrame<S>, TranslateError>;
@@ -36,13 +41,14 @@ pub trait Mapper<S: PageSize> {
 
     fn unmap(&mut self, page: Page<S>) -> Result<(PhysFrame<S>, MapperFlush<S>), UnmapError>;
 
-    unsafe fn identify_map(
+    unsafe fn identity_map(
         &mut self,
         frame: PhysFrame<S>,
         flags: PageTableFlags,
         frame_allocator: &mut impl FrameAllocator<Size4KiB>,
-    ) -> Result<(), MapError<S>> {
-        unimplemented!()
+    ) -> Result<MapperFlush<S>, MapError<S>> {
+        let page = Page::containing_address(VirtAddr::new(frame.start_addr().as_u64()));
+        unsafe { self.map_to(page, frame, flags, frame_allocator) }
     }
 }
 

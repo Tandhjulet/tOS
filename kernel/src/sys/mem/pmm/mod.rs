@@ -11,12 +11,6 @@ pub mod buddy;
 
 pub static PMM: Once<Mutex<BuddyFrameAllocator>> = Once::new();
 
-pub fn init() {
-    // STEP 1: setup boot frame allocaotr
-    // STEP 2: bootstrap buddy frame allocator
-    // STEP 3: exchange PMM
-}
-
 pub fn alloc_page() -> Option<PhysFrame<Size4KiB>> {
     let pmm = PMM.wait();
     if let Some(allocator) = pmm {
