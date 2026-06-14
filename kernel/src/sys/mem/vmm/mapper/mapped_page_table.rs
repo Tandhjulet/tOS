@@ -92,12 +92,8 @@ impl Mapper<Size4KiB> for MappedPageTable<'_> {
             return Err(TranslateError::PageNotMapped);
         }
 
-        let frame: PhysFrame = entry.frame().map_err(|err| match err {
-            FrameError::FrameNotPresent => TranslateError::PageNotMapped,
-            FrameError::HugeFrame => TranslateError::ParentHugePage,
-        })?;
-
-        Ok(frame)
+        PhysFrame::from_start_address(entry.addr())
+            .map_err(|_| TranslateError::InvalidFrameAddress(entry.addr()))
     }
 }
 

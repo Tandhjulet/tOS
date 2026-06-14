@@ -21,11 +21,11 @@ impl PhysAddr {
         self.0
     }
 
-    pub fn align_down(&self, align: u64) -> Self {
+    pub const fn align_down(&self, align: u64) -> Self {
         Self(align_down(self.0 as usize, align as usize) as u64)
     }
 
-    pub fn align_up(&self, align: u64) -> Self {
+    pub const fn align_up(&self, align: u64) -> Self {
         Self(align_up(self.0 as usize, align as usize) as u64)
     }
 

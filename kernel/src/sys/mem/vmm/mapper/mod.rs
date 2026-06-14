@@ -60,4 +60,5 @@ pub enum UnmapError {
 pub enum TranslateError {
     PageNotMapped,
     ParentHugePage,
+    InvalidFrameAddress(PhysAddr),
 }
