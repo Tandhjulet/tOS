@@ -26,3 +26,6 @@ impl PageSize for Size1GiB {
     const SIZE: u64 = Size2MiB::SIZE * 512;
     const LABEL: &'static str = "1GiB";
 }
+
+#[derive(Debug)]
+pub struct AddressNotAligned;

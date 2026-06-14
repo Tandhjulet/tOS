@@ -1,7 +1,7 @@
 use crate::sys::mem::{
     addr::VirtAddr,
     frame::PhysFrame,
-    page_size::{PageSize, Size1GiB, Size2MiB, Size4KiB},
+    page::{PageSize, Size1GiB, Size2MiB, Size4KiB},
     pmm::FrameAllocator,
     vmm::{
         Page,
@@ -45,18 +45,9 @@ impl Mapper<Size4KiB> for MappedPageTable<'_> {
         parent_flags: PageTableFlags,
         frame_allocator: &mut impl FrameAllocator<Size4KiB>,
     ) -> Result<(), super::MapError<Size4KiB>> {
-        let p3 = self.page_table_walker.create_next_table(
-            &mut self.level_4_table[page.p4_index()],
-            parent_flags,
-            frame_allocator,
-        )?;
-        let p2 = self.page_table_walker.create_next_table(
-            &mut p3[page.p3_index()],
-            parent_flags,
-            frame_allocator,
-        )?;
-        let p1 = self.page_table_walker.create_next_table(
-            &mut p2[page.p2_index()],
+        let p1 = self.page_table_walker.create_walk_to_mut(
+            self.level_4_table,
+            &[page.p4_index(), page.p3_index(), page.p2_index()],
             parent_flags,
             frame_allocator,
         )?;
@@ -70,17 +61,11 @@ impl Mapper<Size4KiB> for MappedPageTable<'_> {
         Ok(())
     }
 
-    fn unmap(&mut self, page: Page<Size4KiB>) -> Result<(), super::UnmapError> {
-        let p4 = &mut self.level_4_table;
-        let p3 = self
-            .page_table_walker
-            .next_mut_table(&mut p4[page.p4_index()])?;
-        let p2 = self
-            .page_table_walker
-            .next_mut_table(&mut p3[page.p3_index()])?;
-        let p1 = self
-            .page_table_walker
-            .next_mut_table(&mut p2[page.p2_index()])?;
+    fn unmap(&mut self, page: Page<Size4KiB>) -> Result<PhysFrame, super::UnmapError> {
+        let p1 = self.page_table_walker.walk_to_mut(
+            self.level_4_table,
+            &[page.p4_index(), page.p3_index(), page.p2_index()],
+        )?;
 
         let entry = &mut p1[page.p1_index()];
 
@@ -90,25 +75,29 @@ impl Mapper<Size4KiB> for MappedPageTable<'_> {
         })?;
 
         entry.clear();
-        Ok(())
+        Ok(frame)
     }
 
     fn translate_page(
         &self,
         page: Page<Size4KiB>,
     ) -> Result<PhysFrame<Size4KiB>, super::TranslateError> {
-        let p4 = &self.level_4_table;
-        let p3 = self.page_table_walker.next_table(&p4[page.p4_index()])?;
-        let p2 = self.page_table_walker.next_table(&p3[page.p3_index()])?;
-        let p1 = self.page_table_walker.next_table(&p2[page.p2_index()])?;
+        let p1 = self.page_table_walker.walk_to(
+            self.level_4_table,
+            &[page.p4_index(), page.p3_index(), page.p2_index()],
+        )?;
 
         let entry = &p1[page.p1_index()];
         if entry.is_unused() {
             return Err(TranslateError::PageNotMapped);
         }
 
-        // TODO: get phys frame
-        todo!()
+        let frame: PhysFrame = entry.frame().map_err(|err| match err {
+            FrameError::FrameNotPresent => TranslateError::PageNotMapped,
+            FrameError::HugeFrame => TranslateError::ParentHugePage,
+        })?;
+
+        Ok(frame)
     }
 }
 
@@ -121,13 +110,9 @@ impl Mapper<Size2MiB> for MappedPageTable<'_> {
         parent_flags: PageTableFlags,
         frame_allocator: &mut impl FrameAllocator<Size4KiB>,
     ) -> Result<(), MapError<Size2MiB>> {
-        let p3 = self.page_table_walker.create_next_table(
-            &mut self.level_4_table[page.p4_index()],
-            parent_flags,
-            frame_allocator,
-        )?;
-        let p2 = self.page_table_walker.create_next_table(
-            &mut p3[page.p3_index()],
+        let p2 = self.page_table_walker.create_walk_to_mut(
+            self.level_4_table,
+            &[page.p4_index(), page.p3_index()],
             parent_flags,
             frame_allocator,
         )?;
@@ -141,7 +126,7 @@ impl Mapper<Size2MiB> for MappedPageTable<'_> {
         Ok(())
     }
 
-    fn unmap(&mut self, page: Page<Size2MiB>) -> Result<(), super::UnmapError> {
+    fn unmap(&mut self, page: Page<Size2MiB>) -> Result<PhysFrame<Size2MiB>, super::UnmapError> {
         todo!()
     }
 
@@ -162,8 +147,9 @@ impl Mapper<Size1GiB> for MappedPageTable<'_> {
         parent_flags: PageTableFlags,
         frame_allocator: &mut impl FrameAllocator<Size4KiB>,
     ) -> Result<(), MapError<Size1GiB>> {
-        let p3 = self.page_table_walker.create_next_table(
-            &mut self.level_4_table[page.p4_index()],
+        let p3 = self.page_table_walker.create_walk_to_mut(
+            self.level_4_table,
+            &[page.p4_index()],
             parent_flags,
             frame_allocator,
         )?;
@@ -177,7 +163,7 @@ impl Mapper<Size1GiB> for MappedPageTable<'_> {
         Ok(())
     }
 
-    fn unmap(&mut self, page: Page<Size1GiB>) -> Result<(), super::UnmapError> {
+    fn unmap(&mut self, page: Page<Size1GiB>) -> Result<PhysFrame<Size1GiB>, super::UnmapError> {
         todo!()
     }
 
@@ -255,6 +241,50 @@ impl PageTableWalker {
         }
 
         Ok(page_table)
+    }
+
+    fn walk_to<'b>(
+        &self,
+        root: &'b PageTable,
+        indices: &[PageTableIndex],
+    ) -> Result<&'b PageTable, PageTableWalkError> {
+        let mut current: *const PageTable = root;
+        for &idx in indices {
+            let entry = &(*root)[idx];
+            current = self.next_table_ptr(entry.frame()?) as *const PageTable;
+        }
+
+        Ok(unsafe { &*current })
+    }
+
+    fn walk_to_mut<'b>(
+        &self,
+        root: &'b mut PageTable,
+        indices: &[PageTableIndex],
+    ) -> Result<&'b mut PageTable, PageTableWalkError> {
+        let mut current: *mut PageTable = root;
+        for &idx in indices {
+            let entry = &(*root)[idx];
+            current = self.next_table_ptr(entry.frame()?) as *mut PageTable;
+        }
+
+        Ok(unsafe { &mut *current })
+    }
+
+    fn create_walk_to_mut<'b>(
+        &self,
+        root: &'b mut PageTable,
+        indices: &[PageTableIndex],
+        parent_flags: PageTableFlags,
+        frame_allocator: &mut impl FrameAllocator<Size4KiB>,
+    ) -> Result<&'b mut PageTable, PageTableCreateError> {
+        let mut current: *mut PageTable = root;
+        for &idx in indices {
+            let entry = &mut (*root)[idx];
+            current = self.create_next_table(entry, parent_flags, frame_allocator)?;
+        }
+
+        Ok(unsafe { &mut *current })
     }
 }
 

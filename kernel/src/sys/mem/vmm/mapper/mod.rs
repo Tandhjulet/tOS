@@ -1,7 +1,7 @@
 use crate::sys::mem::{
     addr::PhysAddr,
     frame::PhysFrame,
-    page_size::{PageSize, Size4KiB},
+    page::{PageSize, Size4KiB},
     pmm::FrameAllocator,
     vmm::{Page, paging::PageTableFlags},
 };
@@ -30,7 +30,7 @@ pub trait Mapper<S: PageSize> {
         frame_allocator: &mut impl FrameAllocator<Size4KiB>,
     ) -> Result<(), MapError<S>>;
 
-    fn unmap(&mut self, page: Page<S>) -> Result<(), UnmapError>;
+    fn unmap(&mut self, page: Page<S>) -> Result<PhysFrame<S>, UnmapError>;
 
     unsafe fn identify_map(
         &mut self,

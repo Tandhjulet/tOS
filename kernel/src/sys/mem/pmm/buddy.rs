@@ -4,7 +4,7 @@ use crate::{
     sys::mem::{
         addr::VirtAddr,
         frame::PhysFrame,
-        page_size::Size4KiB,
+        page::Size4KiB,
         pmm::{FrameAllocator, boot::BootFrameAllocator},
     },
 };
