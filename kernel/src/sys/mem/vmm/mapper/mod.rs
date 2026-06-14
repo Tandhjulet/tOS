@@ -53,7 +53,7 @@ pub enum MapError<S: PageSize> {
 pub enum UnmapError {
     ParentHugePage,
     PageNotMapped,
-    InvalidFrameAddr(PhysAddr),
+    InvalidFrameAddress(PhysAddr),
 }
 
 #[derive(Debug)]

@@ -123,14 +123,40 @@ impl Mapper<Size2MiB> for MappedPageTable<'_> {
     }
 
     fn unmap(&mut self, page: Page<Size2MiB>) -> Result<PhysFrame<Size2MiB>, super::UnmapError> {
-        todo!()
+        let p2 = self
+            .page_table_walker
+            .walk_to_mut(self.level_4_table, &[page.p4_index(), page.p3_index()])?;
+
+        let entry = &mut p2[page.p2_index()];
+        if !entry.is_unused() {
+            return Err(UnmapError::PageNotMapped);
+        }
+        if !entry.is_huge() {
+            return Err(UnmapError::ParentHugePage);
+        }
+
+        let frame = PhysFrame::from_start_address(entry.addr())
+            .map_err(|_| UnmapError::InvalidFrameAddress(entry.addr()))?;
+
+        entry.clear();
+        Ok(frame)
     }
 
     fn translate_page(
         &self,
         page: Page<Size2MiB>,
     ) -> Result<PhysFrame<Size2MiB>, super::TranslateError> {
-        todo!()
+        let p2 = self
+            .page_table_walker
+            .walk_to(self.level_4_table, &[page.p4_index(), page.p3_index()])?;
+
+        let entry = &p2[page.p2_index()];
+        if entry.is_unused() {
+            return Err(TranslateError::PageNotMapped);
+        }
+
+        PhysFrame::from_start_address(entry.addr())
+            .map_err(|_| TranslateError::InvalidFrameAddress(entry.addr()))
     }
 }
 
@@ -160,14 +186,40 @@ impl Mapper<Size1GiB> for MappedPageTable<'_> {
     }
 
     fn unmap(&mut self, page: Page<Size1GiB>) -> Result<PhysFrame<Size1GiB>, super::UnmapError> {
-        todo!()
+        let p3 = self
+            .page_table_walker
+            .walk_to_mut(self.level_4_table, &[page.p4_index()])?;
+
+        let entry = &mut p3[page.p3_index()];
+        if !entry.is_unused() {
+            return Err(UnmapError::PageNotMapped);
+        }
+        if !entry.is_huge() {
+            return Err(UnmapError::ParentHugePage);
+        }
+
+        let frame = PhysFrame::from_start_address(entry.addr())
+            .map_err(|_| UnmapError::InvalidFrameAddress(entry.addr()))?;
+
+        entry.clear();
+        Ok(frame)
     }
 
     fn translate_page(
         &self,
         page: Page<Size1GiB>,
     ) -> Result<PhysFrame<Size1GiB>, super::TranslateError> {
-        todo!()
+        let p3 = self
+            .page_table_walker
+            .walk_to(self.level_4_table, &[page.p4_index()])?;
+
+        let entry = &p3[page.p3_index()];
+        if entry.is_unused() {
+            return Err(TranslateError::PageNotMapped);
+        }
+
+        PhysFrame::from_start_address(entry.addr())
+            .map_err(|_| TranslateError::InvalidFrameAddress(entry.addr()))
     }
 }
 
