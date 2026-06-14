@@ -27,16 +27,6 @@ impl<S: PageSize> Page<S> {
         S::SIZE
     }
 
-    pub(super) const fn get_page_table(&self, idx: u8) -> PageTableIndex {
-        match idx {
-            4 => self.p4_index(),
-            3 => self.p3_index(),
-            2 => self.p2_index(),
-            1 => self.p1_index(),
-            _ => unreachable!(),
-        }
-    }
-
     pub(super) const fn p4_index(&self) -> PageTableIndex {
         self.start_address().pml4()
     }

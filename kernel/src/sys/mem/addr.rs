@@ -28,6 +28,17 @@ impl PhysAddr {
     pub fn align_up(&self, align: u64) -> Self {
         Self(align_up(self.0 as usize, align as usize) as u64)
     }
+
+    pub fn is_aligned<U>(&self, align: U) -> bool
+    where
+        U: Into<u64>,
+    {
+        self.is_aligned_64(align.into())
+    }
+
+    pub fn is_aligned_64(&self, align: u64) -> bool {
+        self.align_down(align).0 == self.0
+    }
 }
 
 impl Add<u64> for PhysAddr {
