@@ -26,6 +26,14 @@ impl BootFrameAllocator {
             .map(|r| ((r.end - r.start) / FRAME_SIZE) as usize)
             .sum()
     }
+
+    pub fn usable_frames(&self) -> impl Iterator<Item = PhysFrame<Size4KiB>> {
+        self.memory_map
+            .iter()
+            .filter(|r| r.kind == MemoryRegionKind::Usable)
+            .flat_map(|r| (r.start..r.end).step_by(4096))
+            .map(|addr| PhysFrame::containing_address(PhysAddr::new(addr)))
+    }
 }
 
 unsafe impl FrameAllocator<Size4KiB> for BootFrameAllocator {

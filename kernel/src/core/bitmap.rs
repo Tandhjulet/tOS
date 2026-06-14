@@ -4,7 +4,14 @@ pub struct Bitmap<'a> {
 }
 
 impl<'a> Bitmap<'a> {
-    pub fn get(&mut self, bit: usize) -> bool {
+    pub fn from_raw(ptr: *mut u8, len: usize, bits: usize) -> Self {
+        Self {
+            data: unsafe { core::slice::from_raw_parts_mut(ptr, len) },
+            bits,
+        }
+    }
+
+    pub fn get(&self, bit: usize) -> bool {
         debug_assert!(bit < self.bits);
         (self.data[bit / 8] >> (bit % 8)) & 1 > 0
     }
