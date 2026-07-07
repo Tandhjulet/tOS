@@ -4,6 +4,7 @@ use core::{
 };
 
 pub mod mpsc;
+pub mod relax;
 pub mod rwlock;
 pub mod seqlock;
 pub mod spinlock;
