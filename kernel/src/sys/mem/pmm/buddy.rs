@@ -42,7 +42,7 @@ impl BuddyFrameAllocator {
         align_up(bytes, PAGE_SIZE as usize)
     }
 
-    pub unsafe fn new(boot: &mut BootFrameAllocator, phys_offset: VirtAddr) -> self {
+    pub unsafe fn new(boot: &mut BootFrameAllocator, phys_offset: VirtAddr) -> Self {
         let total_frames = boot.usable_frame_count();
         let bitmap_frame_count = Self::bitmap_frames_needed(total_frames);
 
