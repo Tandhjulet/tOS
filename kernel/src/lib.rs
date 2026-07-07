@@ -8,6 +8,7 @@
 pub mod allocator;
 pub mod filesystem;
 pub mod io;
+pub mod sync;
 pub mod sys;
 pub mod util;
 
