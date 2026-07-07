@@ -1,5 +1,5 @@
-use crate::core::checksum;
 use crate::io::net::Ipv4Addr;
+use crate::util::checksum;
 
 use alloc::{format, string::String};
 use num_enum::TryFromPrimitive;

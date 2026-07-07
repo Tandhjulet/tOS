@@ -4,11 +4,11 @@ use alloc::borrow::ToOwned;
 use alloc::format;
 use alloc::string::String;
 
-use crate::core::checksum;
 use crate::io::net::protocols::dhcp::EnsureDHCPLease;
 use crate::io::net::protocols::ip::{IP, IPProtocol, IpHeader};
 use crate::io::net::protocols::socket::{RecvPacket, SOCKET_TABLE};
 use crate::io::net::{NETWORK_INFO, PacketBuf};
+use crate::util::checksum;
 
 pub mod flag {
     #[allow(unused)]

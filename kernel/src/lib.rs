@@ -6,10 +6,10 @@
 #![reexport_test_harness_main = "test_main"]
 
 pub mod allocator;
-pub mod core;
 pub mod filesystem;
 pub mod io;
 pub mod sys;
+pub mod util;
 
 use ::core::panic::PanicInfo;
 

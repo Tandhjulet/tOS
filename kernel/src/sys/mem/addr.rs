@@ -1,8 +1,8 @@
 use core::ops::{Add, Sub};
 
 use crate::{
-    core::align::{align_down, align_up},
     sys::mem::vmm::paging::PageTableIndex,
+    util::align::{align_down, align_up},
 };
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]

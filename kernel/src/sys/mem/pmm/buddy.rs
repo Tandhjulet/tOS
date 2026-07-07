@@ -2,13 +2,13 @@ use core::ops::Add;
 
 use crate::{
     allocator::mmio::PAGE_SIZE,
-    core::{align::align_up, bitmap::Bitmap},
     sys::mem::{
         addr::{PhysAddr, VirtAddr},
         frame::PhysFrame,
         page::Size4KiB,
         pmm::{FrameAllocator, boot::BootFrameAllocator},
     },
+    util::{align::align_up, bitmap::Bitmap},
 };
 
 // Largest block order supported for the Buddy Allocator.

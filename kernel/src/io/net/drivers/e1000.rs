@@ -126,7 +126,7 @@ pub(super) mod cfg {
     // MISC
     pub const MTA_LENGTH: usize = 128;
     pub const REG_MTA: [u16; MTA_LENGTH] =
-        crate::core::consts::build_range::<MTA_LENGTH>(0x5200, 4); // Multicast Table Array 
+        crate::util::consts::build_range::<MTA_LENGTH>(0x5200, 4); // Multicast Table Array 
 
     pub const RX_BUFFER_SIZE: usize = 8192;
 }
