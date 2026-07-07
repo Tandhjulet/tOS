@@ -1,8 +1,11 @@
 use core::{
     cell::UnsafeCell,
+    marker::PhantomData,
     ops::{Deref, DerefMut},
     sync::atomic::{AtomicBool, Ordering},
 };
+
+use crate::sync::{Lock, WriteLockGuard};
 
 pub struct SpinLock<T> {
     locked: AtomicBool,
@@ -17,7 +20,7 @@ impl<T> SpinLock<T> {
         }
     }
 
-    pub fn lock(&self) -> SpinLockGuard<'_, T> {
+    pub fn lock(&self) -> WriteLockGuard<'_, SpinLock<T>, T> {
         loop {
             if let Some(guard) = self.try_lock() {
                 return guard;
@@ -29,37 +32,34 @@ impl<T> SpinLock<T> {
         }
     }
 
-    pub fn try_lock(&self) -> Option<SpinLockGuard<'_, T>> {
+    pub fn try_lock(&self) -> Option<WriteLockGuard<'_, SpinLock<T>, T>> {
         if self.locked.swap(true, Ordering::Acquire) {
             return None;
         }
 
-        Some(SpinLockGuard { lock: self })
+        Some(WriteLockGuard {
+            lock: self,
+            _data: PhantomData,
+        })
+    }
+
+    unsafe fn unlock(&self) {
+        self.locked.store(false, Ordering::Release);
+    }
+}
+
+unsafe impl<T> Lock<T> for SpinLock<T> {
+    unsafe fn get_data_unchecked(&self) -> *mut T {
+        unsafe { &mut *self.data.get() }
+    }
+
+    unsafe fn unlock_from_reader(&self) {
+        unsafe { self.unlock() }
+    }
+
+    unsafe fn unlock_from_writer(&self) {
+        unsafe { self.unlock() }
     }
 }
 
 unsafe impl<T: Send> Sync for SpinLock<T> {}
-
-pub struct SpinLockGuard<'a, T> {
-    lock: &'a SpinLock<T>,
-}
-
-impl<'a, T> Deref for SpinLockGuard<'a, T> {
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        unsafe { &*self.lock.data.get() }
-    }
-}
-
-impl<'a, T> DerefMut for SpinLockGuard<'a, T> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe { &mut *self.lock.data.get() }
-    }
-}
-
-impl<'a, T> Drop for SpinLockGuard<'a, T> {
-    fn drop(&mut self) {
-        self.lock.locked.store(false, Ordering::Release);
-    }
-}
