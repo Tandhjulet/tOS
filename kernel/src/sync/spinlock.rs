@@ -49,7 +49,7 @@ impl<T> SpinLock<T> {
 
 unsafe impl<T> Lock<T> for SpinLock<T> {
     unsafe fn get_data_unchecked(&self) -> *mut T {
-        unsafe { &mut *self.data.get() }
+        self.data.get()
     }
 
     unsafe fn unlock_from_reader(&self) {

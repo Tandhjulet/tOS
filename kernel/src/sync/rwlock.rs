@@ -109,7 +109,7 @@ impl<T, R: RelaxStrategy> RwLock<T, R> {
 
 unsafe impl<T, R: RelaxStrategy> Lock<T> for RwLock<T, R> {
     unsafe fn get_data_unchecked(&self) -> *mut T {
-        unsafe { &mut *self.data.get() }
+        self.data.get()
     }
 
     unsafe fn unlock_from_reader(&self) {
